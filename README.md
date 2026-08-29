@@ -72,6 +72,34 @@ The test harness starts an isolated PostgreSQL container. `just check` verifies
 generated OpenAPI declarations and browser JavaScript, Python and TypeScript
 types, formatting, security boundaries, API behavior, and browser behavior.
 
+## GSD workflow
+
+Trellmark uses a project-local GSD runtime. The generated `.codex/` directory is
+machine-local and ignored because the GSD installer specializes resource paths
+for the current checkout. GSD planning artifacts under `.planning/` are not
+ignored and should be reviewed and versioned with the project.
+
+Install the pinned GSD runtime with its required temporary Node.js 24 executable
+and an npm cache under `/tmp`:
+
+```bash
+scripts/install_gsd.sh
+```
+
+The helper runs the official installer and normalizes Codex hook commands so
+they resolve from the Git root instead of depending on an npm cache or absolute
+checkout path. Restart Codex from the repository root after installation:
+
+```bash
+cd /path/to/trellmark
+codex
+```
+
+Review and trust the project-local configuration and hooks when Codex prompts
+you; use `/hooks` to inspect them. Run `$gsd-onboard` to initialize GSD for the
+existing Trellmark baseline. `$gsd-new-project` is reserved for an empty
+greenfield repository.
+
 ## GitHub CI/CD
 
 GitHub Actions runs the same checks on `main` and pull requests using a

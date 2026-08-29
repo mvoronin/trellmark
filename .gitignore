@@ -1,5 +1,7 @@
 .venv/
 .idea/
+.codex/
+gsd-local-patches/
 __pycache__/
 *.py[cod]
 .pytest_cache/
