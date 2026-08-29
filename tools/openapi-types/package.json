@@ -1,4 +1,5 @@
 {
+  "//": "typescript is pinned to 5.x on purpose. openapi-typescript declares `typescript: ^5.x`, and TypeScript 7 (the native Go port) exposes only `version` and `versionMajorMinor` from its Node API, so any generator built on the compiler API crashes on `ts.factory` being undefined. This workspace is isolated from the root TypeScript 7 pin used to build web/src. See openapi-ts/openapi-typescript#2841.",
   "name": "trellmark-openapi-types-tool",
   "private": true,
   "scripts": {

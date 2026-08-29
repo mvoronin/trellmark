@@ -36,6 +36,21 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    ignore:
+      # Both TypeScript pins are deliberate and cannot be bumped automatically.
+      #
+      # Root package.json pins typescript exactly, and scripts/verify_typescript.cjs
+      # asserts that exact string on postinstall — so even a patch bump fails npm ci
+      # until the script is edited by hand.
+      #
+      # tools/openapi-types must stay on 5.x: openapi-typescript declares
+      # `typescript: ^5.x`, and TypeScript 7 (the native Go port) exposes only
+      # `version` and `versionMajorMinor` from its Node API. Every generator built on
+      # the compiler API — openapi-typescript and @hey-api/openapi-ts alike — crashes
+      # on `ts.factory` / `ts.SyntaxKind` being undefined.
+      #
+      # Revisit when openapi-ts/openapi-typescript#2841 closes.
+      - dependency-name: "typescript"
     groups:
       npm:
         patterns:
