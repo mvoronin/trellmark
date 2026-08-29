@@ -1,0 +1,95 @@
+name: Bug report
+description: Something in Trellmark does not behave as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚠️ This issue will be public
+
+        Trellmark holds links, notes, and credentials that should never appear
+        in a bug tracker. **Do not attach or paste:**
+
+        - **Exports or dumps** — JSON exports, `just backup` output, `pg_dump`
+          files, or any database contents.
+        - **Credentials** — `.env` files, `TRELLMARK_*` secrets, database or
+          administrator passwords, password hashes, or session cookies.
+        - **Private hostnames or addresses** — your `TRELLMARK_PUBLIC_ORIGIN`,
+          internal domains, or internal IPs.
+        - **Real content** — actual links, notes, or group names.
+
+        Redact logs and tracebacks before pasting, and reproduce with invented
+        data on a scratch instance where you can.
+
+        **Found a vulnerability?** Close this form and
+        [open a private advisory](https://github.com/mvoronin/trellmark/security/advisories/new)
+        instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+      placeholder: Editing a group's domain rules silently drops the safe/private flag.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Numbered steps against a scratch instance, using invented links and
+        group names.
+      placeholder: |
+        1. Create a group "Example" with domain rule `example.test`.
+        2. Mark it private.
+        3. Edit the domain rule.
+        4. The group is now safe.
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: The commit SHA you are running, from `git rev-parse HEAD`.
+      placeholder: 13067f1
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        Deployment shape and versions — Podman Quadlet or local `just dev`,
+        Python, Node, and PostgreSQL versions. No hostnames, please.
+      placeholder: |
+        Local `just dev`, Python 3.14.0, Node 24.4.0, PostgreSQL 18.1
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or tracebacks
+      description: >-
+        Redacted. Strip hostnames, tokens, cookies, and real content first.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            This is not a security vulnerability. (If it is, I will use the
+            private advisory form instead.)
+          required: true
+        - label: >-
+            I have removed exports, dumps, `.env` contents, credentials,
+            private hostnames, and real personal content from this report.
+          required: true

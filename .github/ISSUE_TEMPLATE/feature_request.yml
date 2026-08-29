@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a capability or a change to how Trellmark behaves.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚠️ This issue will be public
+
+        Describe the shape of what you want, not your actual data. **Do not
+        attach or paste** exports, `pg_dump` or `just backup` output, `.env`
+        contents, `TRELLMARK_*` secrets, credentials, session cookies, private
+        hostnames or internal IPs, or your real links, notes, and group names.
+
+        Screenshots are welcome — crop or redact the URL bar, hostnames, and
+        any real content first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What is awkward or impossible today? Describe the situation rather than
+        jumping to a solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+      description: >-
+        How this would behave. Use invented examples for any links, notes, or
+        group names.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you have tried, and why they fall short.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before submitting
+      options:
+        - label: >-
+            I have removed exports, dumps, credentials, private hostnames, and
+            real personal content from this request.
+          required: true
