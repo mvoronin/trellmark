@@ -12,6 +12,11 @@ The service owns both the JSON API and the vanilla TypeScript SPA. Public TLS
 and routing belong to one shared Caddy instance maintained in a separate
 infrastructure repository.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="doc/media/screenshot-dark.png">
+  <img alt="The Trellmark link list: nested groups, importance stars, and per-link edit, refresh, move, and delete controls" src="doc/media/screenshot-light.png">
+</picture>
+
 ## Repository map
 
 - `trellmark/` — web application, API, authentication, storage, and metadata.
@@ -19,6 +24,7 @@ infrastructure repository.
 - `web/src/` — TypeScript source and generated OpenAPI types.
 - `web/static/` — committed browser output included in the application image.
 - `deploy/` — the Trellmark image and rootless Podman Quadlet units.
+- `doc/` — architecture decision records and README media.
 - `tests/` — API, browser, schema, security, and deployment-contract tests.
 
 There is deliberately no migration path from any previous application and no
