@@ -1,0 +1,36 @@
+.git/
+.github/
+.planning/
+.codex/
+.agents/
+.idea/
+.venv/
+node_modules/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local configuration, credentials, certificates, and database material must
+# never enter a public GitHub Actions build context.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+credentials.*
+secrets.*
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql
+
+# Development and deployment-only material is not needed by either image.
+tests/
+doc/
+deploy/quadlet/

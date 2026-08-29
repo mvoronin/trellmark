@@ -1,0 +1,18 @@
+{
+  "name": "trellmark-frontend",
+  "private": true,
+  "type": "commonjs",
+  "workspaces": [
+    "tools/openapi-types"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "generate:api-types": "npm run generate --workspace trellmark-openapi-types-tool",
+    "postinstall": "npm run verify:compiler",
+    "typecheck": "tsc --noEmit",
+    "verify:compiler": "node scripts/verify_typescript.cjs && tsc --version"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

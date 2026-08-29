@@ -1,0 +1,10 @@
+[Pod]
+PodName=trellmark
+
+# The application is intentionally reachable only from this host. A separate,
+# shared Caddy deployment owns 80/443 and reverse-proxies its Trellmark site to
+# http://127.0.0.1:8901. Do not widen this bind to 0.0.0.0.
+PublishPort=127.0.0.1:8901:8000
+
+[Install]
+WantedBy=default.target

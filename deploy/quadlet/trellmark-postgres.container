@@ -1,0 +1,44 @@
+[Unit]
+Description=Trellmark PostgreSQL
+
+[Container]
+# Quadlet would otherwise name this container systemd-trellmark-postgres. The
+# deploy recipe, backup/restore recipes, and README all address it as
+# trellmark-postgres, so the name is pinned rather than left to the default.
+ContainerName=trellmark-postgres
+# Pinned to an explicit major version. A major upgrade is a manual,
+# operator-owned procedure (dump, wipe the volume, restore) — see README.md.
+Image=docker.io/library/postgres:18-alpine
+Pod=trellmark.pod
+# PostgreSQL 18 images store data under a major-version-specific directory
+# (PGDATA defaults to /var/lib/postgresql/18/docker). Mount the parent and let
+# the image own the layout: overriding PGDATA to the pre-18 /var/lib/postgresql/data
+# fights the image's own upgrade guard.
+Volume=trellmark-postgres-data.volume:/var/lib/postgresql
+
+Environment=POSTGRES_USER=trellmark
+Environment=POSTGRES_DB=trellmark
+# The password comes from a Podman secret the operator creates once; it is
+# never written into this file or baked into an image. See README.md.
+Secret=trellmark-db-password,type=env,target=POSTGRES_PASSWORD
+
+# The API waits on this, so readiness has to mean "accepts queries", not
+# "process started".
+#
+# Notify=healthy is what makes that true. Without it the service is considered
+# started the moment conmon launches the container, so the API's
+# After=/Requires=trellmark-postgres.service would be satisfied while initdb or
+# crash recovery is still running — and the API would burn its
+# Restart=on-failure attempts and stay down after a cold boot.
+Notify=healthy
+HealthCmd=pg_isready --username=trellmark --dbname=trellmark --quiet
+HealthInterval=5s
+HealthRetries=12
+HealthStartPeriod=10s
+HealthTimeout=5s
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

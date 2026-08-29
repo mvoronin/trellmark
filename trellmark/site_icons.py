@@ -1,0 +1,316 @@
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+from aiohttp import ClientError, ClientSession, ClientTimeout
+
+from . import page_titles, storage
+from .storage_types import SiteIconCacheRecord
+
+MAX_ICON_BYTES = 256 * 1024
+MAX_ICON_CANDIDATES = 3
+MAX_ICON_REDIRECTS = 3
+ICON_FETCH_TIMEOUT_SECONDS = 3
+POSITIVE_TTL = timedelta(days=30)
+NEGATIVE_TTL = timedelta(days=7)
+MAX_CONCURRENT_ORIGINS = 2
+PNG_MEDIA_TYPE = "image/png"
+ICO_MEDIA_TYPE = "image/vnd.microsoft.icon"
+ICO_SOURCE_MEDIA_TYPES = {"image/x-icon", ICO_MEDIA_TYPE}
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+ICO_MAGIC = b"\x00\x00\x01\x00"
+
+
+@dataclass(frozen=True, slots=True)
+class SiteIcon:
+    data: bytes
+    media_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchedBody:
+    data: bytes
+    media_type: str
+    final_url: str
+    charset: str | None
+
+
+class _IconLinkParser(HTMLParser):
+    def __init__(self, document_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._document_url = document_url
+        self.candidates: list[str] = []
+        self._seen: set[str] = set()
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag.lower() != "link" or len(self.candidates) >= MAX_ICON_CANDIDATES:
+            return
+        attributes = {name.lower(): value for name, value in attrs}
+        rel = attributes.get("rel")
+        href = attributes.get("href")
+        if rel is None or href is None or "icon" not in rel.lower().split():
+            return
+
+        candidate = _http_candidate(self._document_url, href)
+        if candidate is None or candidate in self._seen:
+            return
+        self._seen.add(candidate)
+        self.candidates.append(candidate)
+
+
+type IconFetcher = Callable[[str], Awaitable[SiteIcon | None]]
+type Clock = Callable[[], datetime]
+
+
+def normalize_site_origin(url: str) -> str:
+    """Return the normalized HTTP(S) origin used as the durable cache key."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Enter a valid http or https URL.") from error
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Enter a valid http or https URL.")
+
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname.lower()
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 80 if scheme == "http" else 443
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{display_host}{suffix}"
+
+
+def validate_icon(media_type: str, body: bytes) -> SiteIcon | None:
+    """Accept only bounded PNG/ICO bytes whose declaration matches magic."""
+    if len(body) > MAX_ICON_BYTES:
+        return None
+    declared_type = media_type.split(";", 1)[0].strip().lower()
+    if declared_type == PNG_MEDIA_TYPE and body.startswith(PNG_MAGIC):
+        return SiteIcon(body, PNG_MEDIA_TYPE)
+    if declared_type in ICO_SOURCE_MEDIA_TYPES and body.startswith(ICO_MAGIC):
+        return SiteIcon(body, ICO_MEDIA_TYPE)
+    return None
+
+
+async def fetch_site_icon(url: str) -> SiteIcon | None:
+    """Discover and fetch one safe icon within one three-second deadline."""
+    try:
+        origin = normalize_site_origin(url)
+    except ValueError:
+        return None
+
+    timeout = ClientTimeout(total=ICON_FETCH_TIMEOUT_SECONDS)
+    try:
+        async with asyncio.timeout(ICON_FETCH_TIMEOUT_SECONDS):
+            async with ClientSession(
+                timeout=timeout,
+                headers={"User-Agent": "trellmark/0.1"},
+            ) as session:
+                candidates = await _discover_icon_candidates(session, url)
+                fallback = f"{origin}/favicon.ico"
+                if fallback not in candidates:
+                    candidates.append(fallback)
+
+                for candidate in candidates:
+                    response = await _fetch_public_body(
+                        session,
+                        candidate,
+                        MAX_ICON_BYTES,
+                    )
+                    if response is None:
+                        continue
+                    icon = validate_icon(response.media_type, response.data)
+                    if icon is not None:
+                        return icon
+    except ClientError, TimeoutError:
+        return None
+    return None
+
+
+async def _discover_icon_candidates(
+    session: ClientSession,
+    page_url: str,
+) -> list[str]:
+    response = await _fetch_public_body(
+        session,
+        page_url,
+        page_titles.MAX_TITLE_BYTES,
+    )
+    if response is None or response.media_type not in page_titles.HTML_CONTENT_TYPES:
+        return []
+
+    parser = _IconLinkParser(response.final_url)
+    parser.feed(response.data.decode(response.charset or "utf-8", errors="replace"))
+    parser.close()
+    return parser.candidates
+
+
+async def _fetch_public_body(
+    session: ClientSession,
+    url: str,
+    limit: int,
+) -> _FetchedBody | None:
+    for _ in range(MAX_ICON_REDIRECTS + 1):
+        if not await page_titles.resolves_to_public_host(url):
+            return None
+        try:
+            async with session.get(url, allow_redirects=False) as response:
+                if response.status in page_titles.REDIRECT_STATUSES:
+                    location = response.headers.get("Location")
+                    if not location:
+                        return None
+                    url = urljoin(str(response.url), location)
+                    continue
+                if 300 <= response.status < 400 or response.status >= 400:
+                    return None
+
+                body = await page_titles.read_limited_body(response, limit)
+                if body is None:
+                    return None
+                content_type = response.headers.get("Content-Type", "")
+                media_type = content_type.split(";", 1)[0].strip().lower()
+                return _FetchedBody(
+                    body,
+                    media_type,
+                    str(response.url),
+                    response.charset,
+                )
+        except ClientError, ValueError:
+            return None
+    return None
+
+
+def _http_candidate(document_url: str, href: str) -> str | None:
+    try:
+        parsed = urlsplit(urljoin(document_url, href))
+        parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    display_host = f"[{host}]" if ":" in host else host
+    default_port = 80 if scheme == "http" else 443
+    suffix = f":{parsed.port}" if parsed.port not in {None, default_port} else ""
+    return urlunsplit(
+        parsed._replace(
+            scheme=scheme,
+            netloc=f"{display_host}{suffix}",
+            fragment="",
+        )
+    )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _cached_icon(record: SiteIconCacheRecord | None) -> SiteIcon | None:
+    if record is None:
+        return None
+    data = record["icon_bytes"]
+    media_type = record["media_type"]
+    if data is None or media_type is None:
+        return None
+    return SiteIcon(data, media_type)
+
+
+class SiteIconService:
+    """TTL policy, per-origin singleflight, and bounded background refresh."""
+
+    def __init__(
+        self,
+        *,
+        fetcher: IconFetcher = fetch_site_icon,
+        clock: Clock = _utc_now,
+    ) -> None:
+        self._fetcher = fetcher
+        self._clock = clock
+        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_ORIGINS)
+        self._inflight: dict[str, asyncio.Task[SiteIcon | None]] = {}
+
+    async def get(self, url: str) -> SiteIcon | None:
+        origin = normalize_site_origin(url)
+        cached = storage.read_site_icon_cache(origin)
+        icon = _cached_icon(cached)
+        if cached is not None and cached["retry_after"] > self._clock():
+            return icon
+
+        task = self._refresh_task(origin, url)
+        if icon is not None:
+            return icon
+        return await task
+
+    async def refresh(self, url: str) -> bool:
+        """Bypass TTL, sharing an already-running refresh for this origin."""
+        origin = normalize_site_origin(url)
+        return await self._refresh_task(origin, url) is not None
+
+    async def wait_for_idle(self) -> None:
+        """Wait for scheduled stale refreshes, primarily for clean shutdown/tests."""
+        while self._inflight:
+            await asyncio.gather(
+                *tuple(self._inflight.values()), return_exceptions=True
+            )
+            # A gather over tasks that are already done may complete without
+            # yielding; give their removal callbacks one loop turn.
+            await asyncio.sleep(0)
+
+    def _refresh_task(
+        self,
+        origin: str,
+        url: str,
+    ) -> asyncio.Task[SiteIcon | None]:
+        existing = self._inflight.get(origin)
+        if existing is not None:
+            return existing
+
+        task = asyncio.create_task(self._refresh(origin, url))
+        self._inflight[origin] = task
+        task.add_done_callback(
+            lambda completed, key=origin: self._refresh_done(key, completed)
+        )
+        return task
+
+    async def _refresh(self, origin: str, url: str) -> SiteIcon | None:
+        async with self._semaphore:
+            try:
+                fetched = await self._fetcher(url)
+            except Exception:
+                fetched = None
+
+        now = self._clock()
+        icon = (
+            None if fetched is None else validate_icon(fetched.media_type, fetched.data)
+        )
+        if icon is None:
+            storage.upsert_site_icon_failure(origin, now + NEGATIVE_TTL)
+            return None
+
+        storage.upsert_site_icon_success(
+            origin,
+            icon.data,
+            icon.media_type,
+            now,
+            now + POSITIVE_TTL,
+        )
+        return icon
+
+    def _refresh_done(
+        self,
+        origin: str,
+        completed: asyncio.Task[SiteIcon | None],
+    ) -> None:
+        if self._inflight.get(origin) is completed:
+            del self._inflight[origin]
+        if not completed.cancelled():
+            completed.exception()

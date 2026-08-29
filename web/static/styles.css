@@ -1,0 +1,1257 @@
+/* ============================================================================
+   Trellmark — Metro structure on a restrained constructivist palette.
+
+   Three ideas run through this file:
+
+   1. Flat geometry. No radii, no shadows. Things are separated by a rule or by
+      a block of color, never by a soft edge.
+   2. One palette, two mappings. Layer 1 defines every color exactly once.
+      Layer 2 assigns semantic roles, and light/dark differ only in which end of
+      the same ramp each role points at.
+   3. Fluid, rem-based space. Nearly edge-to-edge on a phone, more air on a
+      wide screen, nothing fixed in px except rule widths.
+   ========================================================================== */
+
+/* ===== Vendored fonts (SIL OFL, ParaType) ==================================
+   PT Sans Narrow carries the interface voice: bands, labels, buttons.
+   Golos Text carries content: link titles, metadata, fields, dialogs.
+   Split by unicode-range so a browser fetches only the scripts it renders. */
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-400-cyrillic-ext.woff2) format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-400-cyrillic.woff2) format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-400-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-400-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-700-cyrillic-ext.woff2) format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-700-cyrillic.woff2) format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-700-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "PT Sans Narrow";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(/static/fonts/ptsansnarrow-700-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* Golos Text is a variable font: one file spans 400–700 per script. */
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(/static/fonts/golostext-400-700-cyrillic-ext.woff2) format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(/static/fonts/golostext-400-700-cyrillic.woff2) format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(/static/fonts/golostext-400-700-latin-ext.woff2) format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Golos Text";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(/static/fonts/golostext-400-700-latin.woff2) format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  /* ==========================================================================
+     LAYER 1 — palette. Every color in the app is defined here, once, and is
+     identical in both themes. Components address Layer 2, not these.
+
+     Written in oklch() on purpose. Its lightness is perceptual and its chroma
+     is independent of hue, so colors that share L and C read as equally heavy
+     and equally saturated no matter which hue they are — which is what lets the
+     group markers differ in color without any of them shouting. hsl()/hwb()
+     cannot express that: hsl(60 80% 50%) is far brighter than hsl(240 80% 50%).
+     ====================================================================== */
+
+  /* Neutral ramp. One warm hue, almost no chroma — paper and printing ink.
+     Light reads it from the top, dark reads the very same steps from the
+     bottom. */
+  --n-00: oklch(97.5% 0.006 80);
+  --n-10: oklch(93.5% 0.008 80);
+  --n-20: oklch(87.0% 0.009 80);
+  --n-30: oklch(72.0% 0.010 80);
+  --n-40: oklch(58.0% 0.010 80);
+  --n-50: oklch(45.0% 0.010 80);
+  --n-60: oklch(33.0% 0.010 80);
+  --n-70: oklch(23.0% 0.009 80);
+  --n-80: oklch(16.0% 0.008 80);
+  --n-90: oklch(8.0% 0.006 80);
+
+  /* Chromatic accents. One lightness, one chroma, hue is the only variable.
+     L is 47% because that is the darkest-but-still-colorful point where
+     --n-00 text on the accent clears WCAG AA (4.7:1) while the accent itself
+     still clears 3:1 against the dark surface. C is 0.10 because that is the
+     most chroma the weakest of these four hues can hold in sRGB at that
+     lightness — going higher would let the browser gamut-map some hues and
+     quietly break the equal-weight guarantee. */
+  --accent-l: 47%;
+  --accent-c: 0.10;
+
+  --hue-red: 27;
+  --hue-ochre: 75;
+  --hue-olive: 135;
+  --hue-steel: 245;
+
+  --red: oklch(var(--accent-l) var(--accent-c) var(--hue-red));
+  --ochre: oklch(var(--accent-l) var(--accent-c) var(--hue-ochre));
+  --olive: oklch(var(--accent-l) var(--accent-c) var(--hue-olive));
+  --steel: oklch(var(--accent-l) var(--accent-c) var(--hue-steel));
+
+  /* ==========================================================================
+     LAYER 2 — semantic roles. Same palette, opposite ends of the ramp.
+     light-dark() keeps the existing color-scheme + [data-theme] mechanism that
+     the no-flash script in index.html depends on.
+     ====================================================================== */
+  color-scheme: light dark;
+
+  --surface: light-dark(var(--n-00), var(--n-80));
+  --surface-sunk: light-dark(var(--n-10), var(--n-70));
+  --surface-invert: light-dark(var(--n-80), var(--n-00));
+
+  --text-main: light-dark(var(--n-80), var(--n-00));
+  --text-muted: light-dark(var(--n-50), var(--n-30));
+  --text-invert: light-dark(var(--n-00), var(--n-80));
+
+  --border: light-dark(var(--n-30), var(--n-50));
+  --border-strong: light-dark(var(--n-80), var(--n-10));
+
+  --accent: var(--red);
+  /* Mixed toward the darkest neutral rather than toward black: black would drag
+     the hue, and the mix has to stay on the same warm axis as the rest. */
+  --accent-pressed: color-mix(in oklab, var(--red) 82%, var(--n-90));
+  --accent-text: var(--n-00); /* near-white on accent in both themes */
+  /* Secondary text on an accent fill. Only one ramp step down from
+     --accent-text, because a fill at --accent-l leaves just 6.1:1 of headroom
+     in its weakest hue and the next step down (--n-20) already misses AA.
+     Hierarchy on a colored band is carried by size and weight, not by value. */
+  --accent-text-muted: var(--n-10);
+  --danger: var(--red);
+  --ok: var(--olive);
+  /* Important is deliberately not the accent: red already means "acts on your
+     data" (add, delete, NSFW), so a starred row painted red reads as a warning. */
+  --important: var(--ochre);
+
+  --backdrop: light-dark(
+    color-mix(in oklab, var(--n-80) 55%, transparent),
+    color-mix(in oklab, var(--n-90) 72%, transparent)
+  );
+
+  --rule: 1px;
+  --rule-strong: 3px;
+
+  --font-display: "PT Sans Narrow", "Arial Narrow", system-ui, sans-serif;
+  --font-text: "Golos Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* ==========================================================================
+     LAYER 3 — fluid scale. Everything in rem so the browser's font size (which
+     is how a user compensates for their display's pixel density) still governs
+     the layout. html font-size is deliberately never overridden.
+     ====================================================================== */
+  --measure: 68rem;
+
+  --gap-1: 0.25rem;
+  --gap-2: 0.5rem;
+  --gap-3: 0.75rem;
+  --gap-4: 1rem;
+
+  /* The page's outer inset. It collapses to a hairline 8px on a phone so almost
+     nothing is spent on margin, and only widens once there is width to spare.
+     It never reaches 0: text touching the bezel is unreadable on a rounded
+     screen, and 8px is not the kind of space anyone misses. */
+  --edge: max(var(--gap-2), clamp(0rem, calc((100vw - 24rem) / 32), 1.5rem));
+
+  --pad-row: clamp(0.375rem, 0.25rem + 0.4vw, 0.75rem);
+  --row-min: clamp(2.5rem, 2.2rem + 1vw, 3rem);
+  --control-h: 2rem;
+  --field-h: 2.5rem;
+
+  --text-xs: clamp(0.6875rem, 0.66rem + 0.08vw, 0.75rem);
+  --text-sm: clamp(0.75rem, 0.72rem + 0.1vw, 0.8125rem);
+  --text-md: clamp(0.875rem, 0.85rem + 0.12vw, 0.9375rem);
+  --text-lg: clamp(1rem, 0.95rem + 0.25vw, 1.125rem);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* A coarse pointer needs a real touch target even though the design is dense. */
+@media (pointer: coarse) {
+  :root {
+    --row-min: 2.75rem;
+    --control-h: 2.25rem;
+  }
+}
+
+/* ===== Global resets ===================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  /* The single radius declaration in this file. Metro is square. */
+  border-radius: 0;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  padding: 0 var(--edge) 3rem;
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: var(--font-text);
+  font-size: var(--text-md);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.auth-shell {
+  min-height: calc(100vh - 3rem);
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--gap-4);
+  padding-block: var(--gap-4);
+}
+
+.auth-shell > p {
+  color: var(--text-muted);
+}
+
+.login-form {
+  width: min(24rem, calc(100vw - (2 * var(--edge))));
+  display: grid;
+  gap: var(--gap-2);
+  padding: clamp(1rem, 4vw, 2rem);
+  border-top: var(--rule-strong) solid var(--accent);
+  border-bottom: var(--rule-strong) solid var(--border-strong);
+  background: var(--surface-sunk);
+}
+
+.login-form h1 {
+  margin: 0 0 var(--gap-3);
+  font-family: var(--font-display);
+  font-size: clamp(1.75rem, 8vw, 2.5rem);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.login-form label,
+.login-form button,
+#logout-button {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.login-form input {
+  width: 100%;
+  height: var(--field-h);
+  padding-inline: var(--gap-3);
+  border: var(--rule) solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.login-form button,
+#logout-button {
+  min-height: var(--control-h);
+  padding: 0 var(--gap-3);
+  border: var(--rule) solid var(--border-strong);
+  background: var(--surface-invert);
+  color: var(--text-invert);
+  cursor: pointer;
+}
+
+.login-form button {
+  height: var(--field-h);
+  margin-top: var(--gap-2);
+}
+
+.login-form button:disabled,
+#logout-button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+#login-status {
+  min-height: 1.25em;
+  margin: var(--gap-1) 0 0;
+  color: var(--danger);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Every label-like string in the interface: narrow, upright, spaced. */
+.group-filter button,
+.theme-toggle button,
+.data-controls button,
+.import-control,
+.sort-control,
+.delete-toggle,
+#logout-button,
+.group-nsfw-toggle,
+.group-form button,
+.url-form > button,
+.confirm-actions button,
+.group-name,
+.group-count,
+.group-nsfw-badge,
+.group-empty,
+#url-count,
+.confirm-title,
+.edit-form > label:not(.group-nsfw-toggle) {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ===== Header ============================================================ */
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: grid;
+  gap: var(--gap-2);
+  margin: 0 calc(var(--edge) * -1) var(--gap-4);
+  padding: var(--gap-2) var(--edge) var(--gap-3);
+  background: var(--surface);
+  /* The one deliberately graphic gesture: a red rule closing the top of the
+     page, and a heavy ink rule closing the header off from the content. */
+  border-top: var(--rule-strong) solid var(--accent);
+  border-bottom: var(--rule-strong) solid var(--border-strong);
+}
+
+.app-header > * {
+  width: min(var(--measure), 100%);
+  margin-inline: auto;
+}
+
+.header-side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-2) var(--gap-3);
+}
+
+.header-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-2) var(--gap-3);
+}
+
+#url-count {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+/* ===== Segmented strips (group filter, theme toggle) ===================== */
+
+.group-filter,
+.theme-toggle {
+  display: inline-flex;
+  border: var(--rule) solid var(--border-strong);
+}
+
+.group-filter button,
+.theme-toggle button {
+  height: var(--control-h);
+  padding: 0 var(--gap-2);
+  border: 0;
+  /* Segments are divided by a rule, not by a gap. */
+  border-inline-start: var(--rule) solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.group-filter button:first-child,
+.theme-toggle button:first-child {
+  border-inline-start: 0;
+}
+
+.group-filter button:hover,
+.theme-toggle button:hover {
+  background: var(--surface-sunk);
+  color: var(--text-main);
+}
+
+.group-filter button[aria-pressed="true"],
+.theme-toggle button[aria-pressed="true"] {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+/* ===== Flat square controls ============================================== */
+
+.data-controls {
+  display: inline-flex;
+  gap: var(--gap-1);
+}
+
+.data-controls button,
+.import-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-h);
+  padding: 0 var(--gap-2);
+  border: var(--rule) solid var(--border-strong);
+  background: transparent;
+  color: var(--text-main);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.data-controls button:hover,
+.data-controls button:focus-visible,
+.import-control:hover,
+.import-control:focus-within {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+.data-controls button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.import-control {
+  position: relative;
+  overflow: hidden;
+}
+
+.import-control input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.delete-toggle,
+.sort-control,
+.group-nsfw-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-1);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.delete-toggle input,
+.group-nsfw-toggle input {
+  accent-color: var(--accent);
+}
+
+.sort-control select,
+.move-select {
+  height: var(--control-h);
+  padding: 0 var(--gap-1);
+  border: var(--rule) solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+/* ===== URL form ========================================================== */
+
+.url-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--gap-2);
+}
+
+.input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.url-form input,
+.group-form input[type="text"],
+.group-form select,
+.edit-form input[type="text"],
+.edit-form textarea,
+.edit-form select {
+  min-width: 0;
+  width: 100%;
+  height: var(--field-h);
+  padding: 0 var(--gap-2);
+  border: var(--rule) solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+  font-family: var(--font-text);
+  font-size: var(--text-md);
+}
+
+.url-form .input-wrap input {
+  padding-inline-end: 2.25rem; /* room for the clear button */
+}
+
+.url-form input:focus,
+.group-form input[type="text"]:focus,
+.group-form select:focus,
+.edit-form input[type="text"]:focus,
+.edit-form textarea:focus,
+.edit-form select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.input-clear {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--field-h);
+  height: var(--field-h);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.input-clear:hover,
+.input-clear:focus-visible {
+  color: var(--text-main);
+}
+
+/* An explicit display would defeat the hidden attribute's UA display:none. */
+.input-clear[hidden] {
+  display: none;
+}
+
+/* The form's own submit button ("Add"); scoped to a direct child so it does not
+   also style the clear button nested inside .input-wrap. */
+.url-form > button {
+  min-width: 5.5rem;
+  height: var(--field-h);
+  padding: 0 var(--gap-4);
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.url-form > button:hover {
+  background: var(--accent-pressed);
+}
+
+.url-form > button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+/* ===== Status bars ======================================================= */
+
+#form-status,
+#group-status,
+.dialog-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: var(--gap-1) var(--gap-2);
+  background: var(--surface-sunk);
+  border-inline-start: var(--rule-strong) solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+#form-status:empty,
+#group-status:empty,
+.dialog-status:empty {
+  display: none;
+}
+
+#form-status.is-success,
+#group-status.is-success {
+  border-inline-start-color: var(--ok);
+  color: var(--text-main);
+}
+
+/* Failure is the one message worth a filled block. Success stays a quiet strip
+   with a colored edge — a confirmation that shouts is one you stop reading.
+   .dialog-status has no success state; the group editor only writes errors. */
+#form-status.is-error,
+#group-status.is-error,
+.dialog-status {
+  background: var(--danger);
+  border-inline-start-color: var(--danger);
+  color: var(--accent-text);
+}
+
+/* ===== Main panel and group form ========================================= */
+
+.url-panel {
+  width: min(var(--measure), 100%);
+  margin-inline: auto;
+  display: grid;
+  gap: var(--gap-4);
+}
+
+.group-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(8rem, auto) auto auto;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+.group-form button {
+  min-width: 5.5rem;
+  height: var(--field-h);
+  padding: 0 var(--gap-3);
+  border: var(--rule) solid var(--border-strong);
+  background: transparent;
+  color: var(--text-main);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.group-form button:hover {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+.group-form button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+/* ===== Groups ============================================================ */
+
+.groups {
+  display: grid;
+  gap: var(--gap-4);
+}
+
+.group {
+  /* The per-group hue is set by app.ts. It borrows the palette's constant
+     lightness and chroma, so groups are told apart by hue alone and every
+     marker carries exactly the same visual weight.
+
+     This is the one place a component touches Layer 1 instead of a semantic
+     role, and it has to: --group-hue is per-instance, and a custom property
+     declared on :root resolves its var() references once, at :root, so the
+     recipe cannot live in the token layer and still see each group's hue. */
+  --group-marker: oklch(
+    var(--accent-l) var(--accent-c) var(--group-hue, var(--hue-red))
+  );
+  border-inline-start: var(--rule-strong) solid var(--group-marker);
+  min-width: 0;
+}
+
+.group-children {
+  display: grid;
+  gap: var(--gap-3);
+  min-width: 0;
+  margin-block-start: var(--gap-3);
+  margin-inline-start: clamp(var(--gap-2), 3vw, var(--gap-5));
+}
+
+.group[data-depth="2"] {
+  border-inline-start-width: calc(var(--rule-strong) + var(--rule));
+}
+
+.group[data-depth="3"] {
+  border-inline-start-style: double;
+  border-inline-start-width: calc(var(--rule-strong) * 2);
+}
+
+.group.dragging {
+  opacity: 0.45;
+}
+
+/* The band is the group's title block, filled with the group's own hue. Ink
+   slabs read as five identical bars shouting for attention; the same slab in
+   color separates the groups just as hard while telling them apart, and the
+   fill is the same one already running down the group's edge marker. Because
+   every accent shares --accent-l and --accent-c, no group's band outweighs
+   another's. It needs no bottom rule — a filled block ends where it ends. */
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  min-height: var(--row-min);
+  padding: var(--gap-1) var(--gap-2);
+  background: var(--group-marker);
+  color: var(--accent-text);
+  cursor: grab;
+  /* Claim touch gestures on the title line so a drag reorders instead of
+     scrolling; prevent text selection while dragging. */
+  touch-action: none;
+  user-select: none;
+}
+
+.group.dragging .group-header {
+  cursor: grabbing;
+}
+
+/* Drawn outside the band, and in the neutral rather than the accent: an accent
+   ring around an accent band vanishes on the red group, and any two accents are
+   only ~1.05:1 apart. Ink-on-paper (paper-on-ink in the dark theme) is the one
+   ring that reads against every hue. */
+.group-header.drag-over {
+  outline: var(--rule-strong) solid var(--border-strong);
+  outline-offset: 0;
+}
+
+/* Same reason — the global red focus ring disappears into a colored band, so
+   on the band the ring switches to the band's own text color. */
+.group-header :focus-visible {
+  outline-color: var(--accent-text);
+}
+
+.fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit; /* the band's text color, whichever theme is up */
+  cursor: pointer;
+}
+
+.fold-toggle::before {
+  content: "";
+  width: 0.375rem;
+  height: 0.375rem;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg); /* points down when expanded */
+  transition: transform 0.12s linear;
+}
+
+.fold-toggle[aria-expanded="false"]::before {
+  transform: rotate(-45deg); /* points right when folded */
+}
+
+.group-name {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+
+.group-count {
+  color: var(--accent-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.group-domains {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent-text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inverted, not filled red: a red block on a colored band is ~1.05:1 against it
+   whatever the hue, so the badge is stamped the other way round — a paper block
+   carrying red — which reads at 6.7:1 on every band. */
+.group-nsfw-badge {
+  padding: 0 var(--gap-1);
+  background: var(--accent-text);
+  color: var(--danger);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.group-actions {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: auto;
+}
+
+.group-action,
+.important-toggle,
+.url-action,
+.delete-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* The edit/delete pair sits on the band, so it starts at the band's muted level
+   and hovers into a stamped paper block — the opposite direction from the row
+   buttons below, which start on the page and hover into a filled block. Filling
+   these with an accent instead would be invisible against the band. */
+.group-action {
+  color: var(--accent-text-muted);
+}
+
+.group-action:hover,
+.group-action:focus-visible {
+  background: var(--accent-text);
+  color: var(--group-marker);
+}
+
+.group-delete:hover,
+.group-delete:focus-visible {
+  background: var(--accent-text);
+  color: var(--danger);
+}
+
+/* Neutral row actions invert into an ink block; only delete gets the accent,
+   so red keeps meaning "this destroys something". */
+.important-toggle:hover,
+.important-toggle:focus-visible,
+.url-action:hover,
+.url-action:focus-visible {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+.delete-button:hover,
+.delete-button:focus-visible {
+  background: var(--danger);
+  color: var(--accent-text);
+}
+
+.important-toggle:disabled,
+.url-action:disabled,
+.delete-button:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+/* ===== URL rows ========================================================== */
+
+.group-urls {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.url-item,
+.group-empty {
+  min-height: var(--row-min);
+  padding: var(--pad-row) var(--gap-2);
+  border-bottom: var(--rule) solid var(--border);
+  background: var(--surface);
+}
+
+.url-item:last-child,
+.group-empty:last-child {
+  border-bottom: 0;
+}
+
+.group-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+/* A small solid block instead of an illustration. */
+.group-empty::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--border);
+}
+
+.url-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--gap-2);
+}
+
+/* Separation by color, not by an extra badge: an important row is washed with
+   the important hue. :has() keeps this in CSS instead of adding a class in
+   app.ts. */
+.url-item:has(.important-toggle.is-important) {
+  background: color-mix(in oklab, var(--important) 12%, var(--surface));
+}
+
+.url-main {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: center;
+  gap: var(--gap-2);
+  min-width: 0;
+}
+
+.site-icon {
+  position: relative;
+  display: block;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.site-icon-placeholder,
+.site-icon-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.site-icon-placeholder {
+  inset: 0.25rem;
+  width: auto;
+  height: auto;
+  background: var(--border);
+}
+
+.site-icon-image {
+  object-fit: contain;
+  opacity: 0;
+}
+
+.site-icon.is-loaded .site-icon-placeholder {
+  opacity: 0;
+}
+
+.site-icon.is-loaded .site-icon-image {
+  opacity: 1;
+}
+
+.url-text {
+  display: grid;
+  gap: 0.125rem;
+  min-width: 0;
+}
+
+.url-item a {
+  overflow-wrap: anywhere;
+  color: var(--text-main);
+  font-size: var(--text-md);
+  font-weight: 600;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+
+.url-item a:hover,
+.url-item a:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.url-item span {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.url-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-1);
+}
+
+.move-select {
+  max-width: 8rem;
+}
+
+/* Lucide sprite icons. Geometry in icons.svg carries no fill/stroke, so these
+   inherited properties style it here; a filled state is just fill: currentColor. */
+.icon {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-star.is-filled {
+  fill: currentColor;
+}
+
+.important-toggle.is-important {
+  color: var(--important);
+}
+
+.important-toggle.is-important .icon-star {
+  fill: currentColor;
+}
+
+/* ===== Dialogs =========================================================== */
+
+.confirm-dialog {
+  width: min(30rem, calc(100% - var(--gap-4)));
+  padding: 0;
+  border: var(--rule-strong) solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-main);
+}
+
+.confirm-dialog::backdrop {
+  background: var(--backdrop, rgb(0 0 0 / 0.6));
+}
+
+.confirm-title {
+  margin: 0;
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--surface-invert);
+  color: var(--text-invert);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.confirm-url {
+  margin: 0;
+  padding: var(--gap-3);
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--gap-2);
+  margin: 0;
+  padding: var(--gap-3);
+  border-top: var(--rule) solid var(--border);
+}
+
+.confirm-actions button {
+  height: var(--field-h);
+  padding: 0 var(--gap-3);
+  border: var(--rule) solid var(--border-strong);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.confirm-cancel {
+  background: transparent;
+  color: var(--text-main);
+}
+
+.confirm-cancel:hover {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+.confirm-delete {
+  background: var(--danger);
+  color: var(--accent-text);
+}
+
+.confirm-save {
+  background: var(--surface-invert);
+  color: var(--text-invert);
+}
+
+.confirm-delete:hover,
+.confirm-save:hover {
+  opacity: 0.85;
+}
+
+/* The group editor is a form filling the whole dialog, so it supplies its own
+   inline padding while the shared title band and action row keep theirs. */
+.edit-form {
+  display: grid;
+  gap: var(--gap-3);
+}
+
+.edit-form > *:not(.confirm-title):not(.confirm-actions) {
+  margin-inline: var(--gap-3);
+}
+
+.edit-form > label:not(.group-nsfw-toggle) {
+  display: grid;
+  gap: var(--gap-1);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.edit-form textarea {
+  min-height: 5.5rem;
+  height: auto;
+  padding: var(--gap-2);
+  resize: vertical;
+}
+
+.group-delete-actions {
+  flex-wrap: wrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ===== Narrow screens ====================================================
+   The scale above already collapses the outer inset and tightens rows, so what
+   is left is re-flowing the things that are genuinely two columns. */
+
+/* A URL row is a title beside a cluster of four controls — star, edit, group
+   select, delete. The title column is minmax(0, 1fr), so nothing overflows as
+   the viewport narrows; it just gets crushed. Around 44rem it stops being worth
+   reading, so the row stacks and the cluster wraps underneath. */
+@media (max-width: 43.75rem) {
+  .url-item {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .url-controls {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 35rem) {
+  .group-form {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  #group-domains {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  #group-parent {
+    grid-column: 1;
+    grid-row: 3;
+    min-width: 0;
+  }
+
+  .group-form .group-nsfw-toggle {
+    grid-column: 1;
+    grid-row: 4;
+  }
+
+  .group-form button {
+    grid-column: 2;
+    grid-row: 1 / span 4;
+    height: 100%;
+  }
+
+  .move-select {
+    max-width: 5rem;
+  }
+
+  .group-children {
+    margin-inline-start: var(--gap-2);
+  }
+
+  .group-delete-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

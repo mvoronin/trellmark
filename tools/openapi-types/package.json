@@ -1,0 +1,12 @@
+{
+  "name": "trellmark-openapi-types-tool",
+  "private": true,
+  "scripts": {
+    "generate": "openapi-typescript ../../web/src/generated/openapi.json -o ../../web/src/generated/openapi.d.ts",
+    "generate:file": "openapi-typescript"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

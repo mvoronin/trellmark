@@ -1,0 +1,32 @@
+[Unit]
+Description=Trellmark application
+After=trellmark-postgres.service
+Requires=trellmark-postgres.service
+
+[Container]
+ContainerName=trellmark-app
+Image=localhost/trellmark:latest
+Pod=trellmark.pod
+# The whole database configuration is this one DSN, supplied as a Podman
+# secret so no password lands in a tracked file or in either image.
+Secret=trellmark-database-url,type=env,target=TRELLMARK_DATABASE_URL
+# Exact browser origin used for Origin/CSRF checks and secure-cookie policy.
+Secret=trellmark-public-origin,type=env,target=TRELLMARK_PUBLIC_ORIGIN
+
+# Public /api/health is process-only. Probe database readiness over the direct
+# pod-local listener. The shared edge Caddy must return 404 for /internal/*.
+Notify=healthy
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/internal/ready', timeout=3).close()"
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthTimeout=5s
+
+[Service]
+# PostgreSQL is already healthy at normal startup. Leave enough time for the
+# API readiness probe to span a transient post-start database interruption.
+TimeoutStartSec=180
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

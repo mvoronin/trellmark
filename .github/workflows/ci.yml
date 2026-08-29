@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python, TypeScript, PostgreSQL, browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    # These values belong only to the disposable PostgreSQL service below.
+    # They are deliberately public test constants, not GitHub secrets or
+    # credentials from any Trellmark installation.
+    env:
+      CI: "true"
+      TRELLMARK_TEST_DATABASE_URL: postgresql://trellmark:trellmark-ci-only@127.0.0.1:5432/postgres
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: trellmark
+          POSTGRES_PASSWORD: trellmark-ci-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=trellmark --dbname=postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: |
+          uv sync --locked --all-groups
+          npm ci
+
+      - name: Install Chromium for browser tests
+        run: uv run playwright install --with-deps chromium
+
+      - name: Check generated API declarations
+        run: |
+          mkdir -p "${RUNNER_TEMP}/generated"
+          uv run python scripts/export_openapi.py "${RUNNER_TEMP}/generated/openapi.json"
+          npm run generate:file --workspace trellmark-openapi-types-tool -- \
+            "${RUNNER_TEMP}/generated/openapi.json" \
+            -o "${RUNNER_TEMP}/generated/openapi.d.ts"
+          diff -u web/src/generated/openapi.json "${RUNNER_TEMP}/generated/openapi.json"
+          diff -u web/src/generated/openapi.d.ts "${RUNNER_TEMP}/generated/openapi.d.ts"
+
+      - name: Check committed browser JavaScript
+        run: |
+          mkdir -p "${RUNNER_TEMP}/frontend"
+          npm run build -- --outDir "${RUNNER_TEMP}/frontend"
+          diff -u web/static/api.js "${RUNNER_TEMP}/frontend/api.js"
+          diff -u web/static/app.js "${RUNNER_TEMP}/frontend/app.js"
+
+      - name: Lint and type-check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run basedpyright trellmark
+          npm run typecheck
+
+      - name: Run the complete test suite
+        run: uv run pytest
+
+      - name: Minimize the saved uv cache
+        if: always()
+        run: uv cache prune --ci

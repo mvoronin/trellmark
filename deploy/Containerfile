@@ -1,0 +1,26 @@
+# One self-contained Trellmark service. TLS and public routing belong to the
+# shared Caddy deployment in the separate infrastructure repository.
+FROM docker.io/library/python:3.14-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+WORKDIR /app
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+ENV PATH="/app/.venv/bin:$PATH"
+
+COPY server.py ./
+COPY alembic.ini ./
+COPY trellmark ./trellmark
+COPY migrations ./migrations
+COPY web/index.html ./web/index.html
+COPY web/static ./web/static
+
+# Quadlet publishes this only on a host loopback port. The shared edge Caddy
+# reaches that port; Trellmark never owns 80/443 or any TLS key material.
+EXPOSE 8000
+
+CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8000"]
