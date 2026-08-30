@@ -1,10 +1,10 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
 
 import trellmark
 from tests.helpers import (
-    assert_validation_error,
     child_names_in,
     clear_authentication,
     db_query,
@@ -14,9 +14,27 @@ from tests.helpers import (
     grouped_url_ids_in,
     grouped_urls_in,
     http_json,
+    run_async,
 )
 from tests.postgres import reset_database
 from trellmark import storage
+
+
+def assert_invalid_import(status, payload):
+    assert status == 422
+    assert payload == {"error": "Invalid import file.", "code": "invalid_import"}
+
+
+def test_export_download_filename_matches_document_timestamp(app):
+    _ = app
+
+    response = run_async(trellmark.export_data)
+    payload = json.loads(response.body)
+    exported_at = datetime.fromisoformat(payload["exported_at"].replace("Z", "+00:00"))
+
+    assert response.headers["content-disposition"] == (
+        f'attachment; filename="trellmark-export-{exported_at:%Y%m%dT%H%M%SZ}.json"'
+    )
 
 
 def test_get_export_returns_groups_and_urls_without_internal_ids(app):
@@ -262,12 +280,16 @@ def test_version_1_preserves_wire_order_for_shared_url_metadata(app):
     )
 
     assert status == 200
+    assert payload["imported"] == 1
+    assert payload["skipped"] == 0
     first = group_in(payload, "First in document")["urls"][0]
     child = group_in(payload, "Child")["urls"][0]
     assert first["id"] == child["id"]
     assert first["title"] == "First metadata"
     assert first["created_at"] == "2026-08-08T12:00:01Z"
     assert first["important"] is True
+    assert grouped_urls_in(payload, "First in document") == ["https://shared.example"]
+    assert grouped_urls_in(payload, "Child") == ["https://shared.example"]
 
 
 def test_version_1_name_matching_uses_database_lower_semantics(app):
@@ -312,7 +334,8 @@ def test_storage_import_rejects_a_missing_parent_before_creating_groups(app):
                         "urls": [],
                     }
                 ],
-            }
+            },
+            validate_against=lambda _groups: None,
         )
 
     assert trellmark.read_group_records() == before
@@ -321,20 +344,20 @@ def test_storage_import_rejects_a_missing_parent_before_creating_groups(app):
 def test_storage_import_reports_a_sibling_set_that_disappears(app, monkeypatch):
     parent = trellmark.add_group("Parent")
     assert parent is not None
-    original_read_group_records = storage.read_group_records
+    original_read_group_records_on = storage._read_group_records_on
     read_count = 0
 
-    def read_changing_groups():
+    def read_changing_groups(connection):
         nonlocal read_count
         read_count += 1
-        groups = original_read_group_records()
+        groups = original_read_group_records_on(connection)
         if read_count == 2:
             # The post-attach read that builds current_ids_by_parent.
             stored_parent = next(group for group in groups if group["name"] == "Parent")
             stored_parent["children"] = []
         return groups
 
-    monkeypatch.setattr(storage, "read_group_records", read_changing_groups)
+    monkeypatch.setattr(storage, "_read_group_records_on", read_changing_groups)
 
     with pytest.raises(RuntimeError, match="Imported sibling set no longer exists"):
         trellmark.import_saved_data(
@@ -350,7 +373,8 @@ def test_storage_import_reports_a_sibling_set_that_disappears(app, monkeypatch):
                         "urls": [],
                     }
                 ],
-            }
+            },
+            validate_against=lambda _groups: None,
         )
 
 
@@ -394,7 +418,7 @@ def test_version_1_rejects_an_invalid_hierarchy_before_any_write(app, groups):
         base_url, "/api/import", method="POST", payload=document
     )
 
-    assert_validation_error(status, response)
+    assert_invalid_import(status, response)
     assert "Invalid import file." in str(response)
     assert trellmark.read_group_records() == before_groups
     assert trellmark.read_url_records() == before_urls
@@ -428,7 +452,7 @@ def test_version_1_rejects_depth_against_existing_ancestors_before_any_write(app
         },
     )
 
-    assert_validation_error(status, response)
+    assert_invalid_import(status, response)
     assert "Invalid import file." in str(response)
     assert trellmark.read_group_records() == before
 
@@ -459,7 +483,7 @@ def test_version_1_rejects_a_cycle_through_an_existing_descendant(app):
         },
     )
 
-    assert_validation_error(status, response)
+    assert_invalid_import(status, response)
     assert "Invalid import file." in str(response)
     assert trellmark.read_group_records() == before
 
@@ -824,6 +848,7 @@ def test_post_import_defaults_group_nsfw_to_false(app):
 @pytest.mark.parametrize(
     "payload",
     [
+        None,
         {},
         {"version": 2, "groups": []},
         {"version": 1, "groups": "not a list"},
@@ -832,6 +857,14 @@ def test_post_import_defaults_group_nsfw_to_false(app):
         {"version": 1, "groups": [{"name": "", "position": 0, "urls": []}]},
         {"version": 1, "groups": [{"name": "default", "position": True, "urls": []}]},
         {"version": 1, "groups": [{"name": "default", "position": 0, "urls": {}}]},
+        {
+            "version": 1,
+            "exported_at": "2026-07-03T12:00:00Z",
+            "groups": [
+                {"name": "Same", "position": 0, "urls": []},
+                {"name": "same", "position": 1, "urls": []},
+            ],
+        },
         {
             "version": 1,
             "groups": [
@@ -903,6 +936,6 @@ def test_post_import_rejects_malformed_file(app, payload):
         base_url, "/api/import", method="POST", payload=payload
     )
 
-    assert_validation_error(status, response)
+    assert_invalid_import(status, response)
     assert [group["name"] for group in trellmark.read_group_records()] == ["default"]
     assert trellmark.read_urls() == []

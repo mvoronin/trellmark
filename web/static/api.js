@@ -18,6 +18,21 @@ let sessionExpiredHandler = null;
 let expiryTransitionSent = false;
 export class SessionExpiredError extends Error {
 }
+export class ImportApiError extends Error {
+    status;
+    payload;
+    code;
+    constructor(status, payload) {
+        super(payload.error);
+        this.status = status;
+        this.payload = payload;
+        this.name = "ImportApiError";
+        this.code = payload.code;
+    }
+}
+export function isImportApiError(error) {
+    return error instanceof ImportApiError;
+}
 export function setSessionExpiredHandler(handler) {
     sessionExpiredHandler = handler;
 }
@@ -72,16 +87,40 @@ async function readJson(response) {
         return {};
     }
 }
-async function jsonRequest(path, init, fallbackError, authenticationRequired = true) {
+async function jsonRequest(path, init, fallbackError, authenticationRequired = true, errorFactory) {
     const response = await fetch(path, { ...init, credentials: "same-origin" });
     const payload = await readJson(response);
     if (!response.ok) {
         if (response.status === 401 && authenticationRequired) {
             throw expiredSessionError();
         }
+        if (errorFactory) {
+            throw errorFactory(response.status, payload, fallbackError);
+        }
         throw new Error(errorMessage(payload, fallbackError));
     }
     return payload;
+}
+function hasImportErrorCode(payload, code) {
+    return (payload !== null &&
+        typeof payload === "object" &&
+        "error" in payload &&
+        typeof payload.error === "string" &&
+        "code" in payload &&
+        payload.code === code);
+}
+function importError(status, payload, fallback) {
+    if (status === 409 &&
+        hasImportErrorCode(payload, "import_conflict")) {
+        return new ImportApiError(status, payload);
+    }
+    if (status === 422 && hasImportErrorCode(payload, "invalid_import")) {
+        return new ImportApiError(status, payload);
+    }
+    if (status === 500 && hasImportErrorCode(payload, "import_failed")) {
+        return new ImportApiError(status, payload);
+    }
+    return new Error(errorMessage(payload, fallback));
 }
 function jsonInit(method, body) {
     const headers = { "Content-Type": "application/json" };
@@ -139,7 +178,7 @@ export async function importData(body) {
             ...(csrfToken === null ? {} : { "X-CSRF-Token": csrfToken }),
         },
         body: typeof body === "string" ? body : JSON.stringify(body),
-    }, "Could not import URLs.");
+    }, "Could not import URLs.", true, importError);
 }
 export async function createGroup(body) {
     return jsonRequest(groupsPath, jsonInit("POST", body), "Could not create group.");

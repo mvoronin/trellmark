@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Annotated, Any, TypeVar, cast
 from urllib.parse import parse_qs
@@ -29,8 +30,11 @@ from .models import (
     EditURLResponse,
     ExportDocument,
     GroupsResponse,
+    ImportConflictResponse,
     ImportDocument,
+    ImportFailedResponse,
     ImportResponse,
+    InvalidImportResponse,
     MoveURLGroup,
     MoveURLGroupResponse,
     RefreshURLMetadataResponse,
@@ -59,6 +63,7 @@ from .storage import (
     URL_CONFLICT,
     URL_NOT_FOUND,
     URL_VERSION_CONFLICT,
+    BookmarkMutationConflict,
     ParentUpdate,
     add_url,
     export_saved_data,
@@ -83,7 +88,7 @@ from .storage import (
 from .storage import (
     update_group as update_group_record,
 )
-from .storage_types import UpdateURLFields
+from .storage_types import GroupRecord, UpdateURLFields
 from .url_normalization import normalize_url
 
 PositiveID = Annotated[int, Path(ge=1)]
@@ -104,20 +109,6 @@ def _request_validation_error(error: ValidationError) -> RequestValidationError:
         loc = item.get("loc", ())
         errors.append({**item, "loc": ("body", *loc)})
     return RequestValidationError(errors)
-
-
-def _import_validation_error(error: ValueError) -> RequestValidationError:
-    return RequestValidationError(
-        [
-            {
-                "type": "value_error",
-                "loc": ("body",),
-                "msg": f"Value error, {error}",
-                "input": None,
-                "ctx": {"error": str(error)},
-            }
-        ]
-    )
 
 
 async def _json_model(request: Request, model: type[ModelT]) -> ModelT:
@@ -163,28 +154,81 @@ async def list_groups() -> JSONObject:
 
 
 async def export_data() -> JSONResponse:
-    exported_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    document = export_saved_data(exported_at.replace("+00:00", "Z"))
+    exported_at = datetime.now(timezone.utc).replace(microsecond=0)
+    document = export_saved_data(exported_at.isoformat().replace("+00:00", "Z"))
+    filename = f"trellmark-export-{exported_at:%Y%m%dT%H%M%SZ}.json"
     return JSONResponse(
         _validated_response(ExportDocument, document),
-        headers={"Content-Disposition": 'attachment; filename="trellmark-export.json"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
-async def import_data(document: ImportDocument) -> JSONObject:
+async def import_data(document: ImportDocument) -> JSONObject | JSONResponse:
+    def validate_import(existing_groups: Sequence[GroupRecord]) -> None:
+        try:
+            document.validate_against(existing_groups)
+        except ValueError as error:
+            raise InvalidImportDocumentError from error
+
     try:
-        document.validate_against(read_group_records())
-    except ValueError as error:
-        raise _import_validation_error(error) from error
-    return _validated_response(
-        ImportResponse,
-        import_saved_data(document.to_storage_document()),
-    )
+        result = import_saved_data(
+            document.to_storage_document(),
+            validate_against=validate_import,
+        )
+    except InvalidImportDocumentError:
+        return _import_error_response(
+            InvalidImportResponse,
+            422,
+            message=INVALID_IMPORT_MESSAGE,
+            code="invalid_import",
+        )
+    except BookmarkMutationConflict:
+        return _import_error_response(
+            ImportConflictResponse,
+            409,
+            message=IMPORT_CONFLICT_MESSAGE,
+            code="import_conflict",
+        )
+    except Exception:
+        return _import_error_response(
+            ImportFailedResponse,
+            500,
+            message=IMPORT_FAILED_MESSAGE,
+            code="import_failed",
+        )
+    return _validated_response(ImportResponse, result)
 
 
+class InvalidImportDocumentError(ValueError):
+    """Import hierarchy validation failed before the transaction's first DML."""
+
+
+INVALID_IMPORT_MESSAGE = "Invalid import file."
+BOOKMARK_MUTATION_CONFLICT_MESSAGE = (
+    "Another bookmark change is in progress. Try again."
+)
+IMPORT_CONFLICT_MESSAGE = (
+    "Another bookmark change is in progress. No import changes were saved. Try again."
+)
+IMPORT_FAILED_MESSAGE = "Import failed. No import changes were saved. Try again."
 GROUP_MISSING = "This group does not exist."
 GROUP_TOO_DEEP = "Groups can be nested three levels deep."
 GROUP_INSIDE_ITSELF = "A group cannot be moved into itself."
+
+
+def _bookmark_mutation_conflict_response() -> JSONResponse:
+    return _error_response(BOOKMARK_MUTATION_CONFLICT_MESSAGE, 409)
+
+
+def _import_error_response(
+    model: type[ModelT],
+    status: int,
+    *,
+    message: str,
+    code: str,
+) -> JSONResponse:
+    model.model_validate({"error": message, "code": code})
+    return _error_response(message, status, code=code)
 
 
 def _hierarchy_error_response(error: str | None) -> JSONResponse | None:
@@ -210,12 +254,15 @@ async def create_group(request: Request) -> JSONObject | JSONResponse:
             return _error_response("Enter valid domains.", 400)
         raise
 
-    group, error = create_group_record(
-        payload.name,
-        nsfw=payload.nsfw,
-        domains=payload.domains,
-        parent_id=payload.parent_id,
-    )
+    try:
+        group, error = create_group_record(
+            payload.name,
+            nsfw=payload.nsfw,
+            domains=payload.domains,
+            parent_id=payload.parent_id,
+        )
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == GROUP_NAME_CONFLICT:
         return _error_response("This group already exists.", 409)
     hierarchy_response = _hierarchy_error_response(error)
@@ -250,13 +297,16 @@ async def edit_group(
         if "parent_id" in payload.model_fields_set
         else UNCHANGED_PARENT
     )
-    record, error = update_group_record(
-        group_id,
-        name=payload.name,
-        nsfw=payload.nsfw,
-        domains=payload.domains,
-        parent_id=parent_update,
-    )
+    try:
+        record, error = update_group_record(
+            group_id,
+            name=payload.name,
+            nsfw=payload.nsfw,
+            domains=payload.domains,
+            parent_id=parent_update,
+        )
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == GROUP_NOT_FOUND:
         return _error_response(GROUP_MISSING, 404)
     if error == DEFAULT_GROUP:
@@ -288,7 +338,10 @@ async def delete_group(
     except json.JSONDecodeError, ValidationError:
         return _error_response("Choose how to handle this group's URLs.", 400)
 
-    result, error = delete_group_record(group_id, payload.url_action)
+    try:
+        result, error = delete_group_record(group_id, payload.url_action)
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == GROUP_NOT_FOUND:
         return _error_response(GROUP_MISSING, 404)
     if error == DEFAULT_GROUP:
@@ -308,7 +361,10 @@ async def create_url(request: Request) -> JSONObject | JSONResponse:
     except ValueError as error:
         return _error_response(str(error), 400)
 
-    record = add_url(url)
+    try:
+        record = add_url(url)
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if not record:
         return _error_response("This URL is already saved.", 409)
 
@@ -317,7 +373,10 @@ async def create_url(request: Request) -> JSONObject | JSONResponse:
     except Exception:
         title = None
     if title is not None:
-        record = update_url_title(record["id"], title) or record
+        try:
+            record = update_url_title(record["id"], title) or record
+        except BookmarkMutationConflict:
+            return _bookmark_mutation_conflict_response()
 
     payload = {
         "url": record,
@@ -349,11 +408,14 @@ async def edit_url(
     if "title" in payload.model_fields_set:
         fields["title"] = payload.title
 
-    record, error = update_url_record(
-        url_id,
-        expected_version=payload.version,
-        fields=fields,
-    )
+    try:
+        record, error = update_url_record(
+            url_id,
+            expected_version=payload.version,
+            fields=fields,
+        )
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == URL_NOT_FOUND:
         return _error_response("This URL is not saved.", 404)
     if error == URL_CONFLICT:
@@ -391,11 +453,14 @@ async def refresh_url_title(
             },
         )
 
-    updated, error = update_url_record(
-        url_id,
-        expected_version=record["version"],
-        fields={"title": title},
-    )
+    try:
+        updated, error = update_url_record(
+            url_id,
+            expected_version=record["version"],
+            fields={"title": title},
+        )
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == URL_NOT_FOUND:
         return _error_response("This URL is not saved.", 404)
     if error == URL_VERSION_CONFLICT:
@@ -445,11 +510,14 @@ async def refresh_url_metadata(
     )
     title_updated = title is not None
     if title is not None:
-        current, error = update_url_record(
-            url_id,
-            expected_version=record["version"],
-            fields={"title": title},
-        )
+        try:
+            current, error = update_url_record(
+                url_id,
+                expected_version=record["version"],
+                fields={"title": title},
+            )
+        except BookmarkMutationConflict:
+            return _bookmark_mutation_conflict_response()
         if error == URL_NOT_FOUND:
             return _error_response("This URL is not saved.", 404)
         if error == URL_VERSION_CONFLICT:
@@ -498,11 +566,14 @@ async def move_url_group(
     url_id: PositiveID,
     payload: MoveURLGroup,
 ) -> JSONObject | JSONResponse:
-    result, error = move_url_to_group(
-        url_id,
-        payload.group_id,
-        payload.source_group_id,
-    )
+    try:
+        result, error = move_url_to_group(
+            url_id,
+            payload.group_id,
+            payload.source_group_id,
+        )
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if error == MOVE_URL_NOT_FOUND:
         return _error_response("This URL is not saved.", 404)
     if error == MOVE_GROUP_NOT_FOUND:
@@ -527,7 +598,10 @@ async def set_important(
     url_id: PositiveID,
     payload: SetImportant,
 ) -> JSONObject | JSONResponse:
-    record = set_url_important(url_id, payload.important)
+    try:
+        record = set_url_important(url_id, payload.important)
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if not record:
         return _error_response("This URL is not saved.", 404)
 
@@ -536,7 +610,11 @@ async def set_important(
 
 
 async def reorder_groups(payload: ReorderGroups) -> JSONObject | JSONResponse:
-    if not update_group_order(payload.parent_id, payload.group_ids):
+    try:
+        reordered = update_group_order(payload.parent_id, payload.group_ids)
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
+    if not reordered:
         return _error_response("Invalid group order.", 400)
 
     return _validated_response(ReorderGroupsResponse, {"groups": read_group_records()})
@@ -546,7 +624,10 @@ async def delete_url_by_id(
     url_id: PositiveID,
     group_id: Annotated[int, Query(ge=1)],
 ) -> JSONObject | JSONResponse:
-    record = remove_url_by_id(url_id, group_id)
+    try:
+        record = remove_url_by_id(url_id, group_id)
+    except BookmarkMutationConflict:
+        return _bookmark_mutation_conflict_response()
     if not record:
         return _error_response("This URL is not saved.", 404)
 

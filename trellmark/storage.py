@@ -1,4 +1,5 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -51,6 +52,7 @@ from .storage_types import (
     GroupRecord,
     ImportDocument,
     ImportResult,
+    ImportURLRecord,
     SiteIconCacheRecord,
     UpdateURLFields,
     URLRecord,
@@ -98,6 +100,35 @@ MAX_GROUP_DEPTH = 3
 # this database ever takes; the roots use a key no group id can have.
 SIBLING_LOCK_NAMESPACE = 7501
 ROOT_SIBLING_LOCK_KEY = 0
+
+# Import takes this transaction-scoped gate before any sibling lock. The
+# namespace is deliberately distinct from the sibling-set namespace so the
+# global operation boundary cannot alias a positional lock.
+BOOKMARK_MUTATION_LOCK_NAMESPACE = 7502
+BOOKMARK_MUTATION_LOCK_KEY = 0
+
+
+class BookmarkMutationConflict(RuntimeError):
+    """Another bookmark mutation owns the shared PostgreSQL gate."""
+
+
+type ImportValidator = Callable[[Sequence[GroupRecord]], None]
+type ImportStageHook = Callable[[str], None]
+
+IMPORT_MUTATION_STAGES = (
+    "group_metadata",
+    "hierarchy_detach",
+    "hierarchy_attach",
+    "sibling_order",
+    "url_insert",
+    "membership_insert",
+    "url_metadata",
+)
+
+
+def _ignore_import_stage(_stage: str) -> None:
+    pass
+
 
 type MoveURLGroupError = Literal[
     "group_not_found", "url_not_found", "source_not_found", "source_required"
@@ -332,6 +363,24 @@ def get_connection() -> Connection:
     return get_engine().connect()
 
 
+@contextmanager
+def _bookmark_mutation() -> Generator[Connection]:
+    """Yield one connection whose outer transaction owns the bookmark gate."""
+    with get_connection() as connection:
+        with connection.begin():
+            acquired = connection.scalar(
+                select(
+                    func.pg_try_advisory_xact_lock(
+                        BOOKMARK_MUTATION_LOCK_NAMESPACE,
+                        BOOKMARK_MUTATION_LOCK_KEY,
+                    )
+                )
+            )
+            if acquired is not True:
+                raise BookmarkMutationConflict
+            yield connection
+
+
 def alembic_config() -> Config:
     # No sqlalchemy.url is set here: migrations/env.py reads the DSN from
     # trellmark.config directly, so a password never passes through ConfigParser
@@ -529,43 +578,45 @@ def read_group_records() -> list[GroupRecord]:
     parent, so every bucket comes out in sibling order.
     """
     with get_connection() as connection:
-        groups = (
-            connection.execute(_group_record_select().order_by(groups_table.c.position))
-            .mappings()
-            .all()
-        )
-        url_rows = (
-            connection.execute(
-                select(
-                    urls_table.c.id,
-                    url_groups_table.c.group_id,
-                    urls_table.c.url,
-                    urls_table.c.title,
-                    urls_table.c.important,
-                    urls_table.c.version,
-                    urls_table.c.created_at,
-                )
-                .select_from(
-                    url_groups_table.join(
-                        urls_table, url_groups_table.c.url_id == urls_table.c.id
-                    ).join(
-                        groups_table, url_groups_table.c.group_id == groups_table.c.id
-                    )
-                )
-                .order_by(urls_table.c.id)
+        return _read_group_records_on(connection)
+
+
+def _read_group_records_on(connection: Connection) -> list[GroupRecord]:
+    groups = (
+        connection.execute(_group_record_select().order_by(groups_table.c.position))
+        .mappings()
+        .all()
+    )
+    url_rows = (
+        connection.execute(
+            select(
+                urls_table.c.id,
+                url_groups_table.c.group_id,
+                urls_table.c.url,
+                urls_table.c.title,
+                urls_table.c.important,
+                urls_table.c.version,
+                urls_table.c.created_at,
             )
-            .mappings()
-            .all()
-        )
-        domain_rows = (
-            connection.execute(
-                select(group_domains_table.c.group_id, group_domains_table.c.domain)
-                .join(groups_table, group_domains_table.c.group_id == groups_table.c.id)
-                .order_by(groups_table.c.position, group_domains_table.c.domain)
+            .select_from(
+                url_groups_table.join(
+                    urls_table, url_groups_table.c.url_id == urls_table.c.id
+                ).join(groups_table, url_groups_table.c.group_id == groups_table.c.id)
             )
-            .mappings()
-            .all()
+            .order_by(urls_table.c.id)
         )
+        .mappings()
+        .all()
+    )
+    domain_rows = (
+        connection.execute(
+            select(group_domains_table.c.group_id, group_domains_table.c.domain)
+            .join(groups_table, group_domains_table.c.group_id == groups_table.c.id)
+            .order_by(groups_table.c.position, group_domains_table.c.domain)
+        )
+        .mappings()
+        .all()
+    )
 
     urls_by_group: dict[int, list[URLRecord]] = {
         _row_int(group, "id"): [] for group in groups
@@ -661,15 +712,38 @@ def export_saved_data(exported_at: str) -> ExportDocument:
     }
 
 
-def import_saved_data(document: ImportDocument) -> ImportResult:
-    stored_groups = flatten_group_records(read_group_records())
+def import_saved_data(
+    document: ImportDocument,
+    *,
+    validate_against: ImportValidator,
+    after_stage: ImportStageHook = _ignore_import_stage,
+) -> ImportResult:
+    with _bookmark_mutation() as connection:
+        existing_groups = _read_group_records_on(connection)
+        validate_against(existing_groups)
+        return _import_saved_data_on(
+            connection,
+            document,
+            existing_groups,
+            after_stage=after_stage,
+        )
+
+
+def _import_saved_data_on(
+    connection: Connection,
+    document: ImportDocument,
+    existing_groups: Sequence[GroupRecord],
+    *,
+    after_stage: ImportStageHook,
+) -> ImportResult:
+    stored_groups = flatten_group_records(existing_groups)
     groups_by_name = {group["name"].lower(): group for group in stored_groups}
     group_ids_by_name = {key: group["id"] for key, group in groups_by_name.items()}
     document_group_keys = {group["name"].lower() for group in document["groups"]}
 
-    # Validation and import intentionally use separate snapshots until
-    # TASK-0040 makes the whole import transactional. Recheck parent-only
-    # references before the first mutation, and fail explicitly if one vanished.
+    # The supplied validator owns the supported document contract. This
+    # defensive check keeps direct storage callers from creating a missing
+    # parent when they provide a weaker callback.
     for group in document["groups"]:
         parent_key = None if group["parent"] is None else group["parent"].lower()
         if (
@@ -682,22 +756,26 @@ def import_saved_data(document: ImportDocument) -> ImportResult:
     for group in document["groups"]:
         key = group["name"].lower()
         group_record = groups_by_name.get(key)
+        metadata_mutated = group_record is None
         if group_record is None:
-            group_record = add_group(
+            group_record, create_error = _create_group_on(
+                connection,
                 group["name"],
                 nsfw=group["nsfw"],
                 domains=group["domains"],
             )
-        if group_record is None:
-            group_record = read_group_record_by_name(group["name"])
-        if group_record is None:
-            raise RuntimeError("Group could not be created.")
+            if group_record is None:
+                raise RuntimeError(f"Group could not be created: {create_error}.")
         groups_by_name[key] = group_record
         group_ids_by_name[key] = group_record["id"]
         if group_record["nsfw"] != group["nsfw"]:
-            _set_group_nsfw(group_record["id"], group["nsfw"])
+            _set_group_nsfw_on(connection, group_record["id"], group["nsfw"])
+            metadata_mutated = True
         if group_record["domains"] != group["domains"]:
-            _set_group_domains(group_record["id"], group["domains"])
+            _set_group_domains_on(connection, group_record["id"], group["domains"])
+            metadata_mutated = True
+        if metadata_mutated:
+            after_stage("group_metadata")
 
     desired_parent_ids: dict[str, int | None] = {}
     for group in document["groups"]:
@@ -716,20 +794,26 @@ def import_saved_data(document: ImportDocument) -> ImportResult:
         key = group["name"].lower()
         if key not in desired_parent_ids or group["parent_id"] is None:
             continue
-        updated, error = update_group(group["id"], parent_id=None)
+        updated, error = _update_group_on(connection, group["id"], parent_id=None)
         if updated is None:
             raise RuntimeError(f"Imported group could not be detached: {error}.")
+        after_stage("hierarchy_detach")
 
     for group in document["groups"]:
         key = group["name"].lower()
         parent_id = desired_parent_ids[key]
         if parent_id is None:
             continue
-        updated, error = update_group(group_ids_by_name[key], parent_id=parent_id)
+        updated, error = _update_group_on(
+            connection,
+            group_ids_by_name[key],
+            parent_id=parent_id,
+        )
         if updated is None:
             raise RuntimeError(f"Imported group could not be attached: {error}.")
+        after_stage("hierarchy_attach")
 
-    current_groups = flatten_group_records(read_group_records())
+    current_groups = flatten_group_records(_read_group_records_on(connection))
     current_ids_by_parent: dict[int | None, list[int]] = {}
     for group in current_groups:
         current_ids_by_parent.setdefault(group["parent_id"], []).append(group["id"])
@@ -754,8 +838,9 @@ def import_saved_data(document: ImportDocument) -> ImportResult:
             for group_id in current_sibling_ids
             if group_id not in imported_id_set
         ]
-        if not update_group_order(parent_id, full_order):
+        if not _update_group_order_on(connection, parent_id, full_order):
             raise RuntimeError("Imported group order could not be restored.")
+        after_stage("sibling_order")
 
     imported = 0
     skipped = 0
@@ -765,21 +850,46 @@ def import_saved_data(document: ImportDocument) -> ImportResult:
         for record in group["urls"]:
             already_imported_id = imported_url_ids.get(record["url"])
             if already_imported_id is not None:
-                _add_url_to_group(already_imported_id, group_id)
+                _add_url_to_group_on(connection, already_imported_id, group_id)
+                after_stage("membership_insert")
                 continue
 
-            inserted = add_url(record["url"], title=record["title"])
+            inserted = _insert_import_url_on(connection, record)
             if not inserted:
                 skipped += 1
                 continue
+            after_stage("url_insert")
 
-            _set_url_group(inserted["id"], group_id)
+            _set_url_group_on(connection, inserted["id"], group_id)
+            after_stage("membership_insert")
             imported_url_ids[record["url"]] = inserted["id"]
-            update_url_created_at(inserted["id"], record["created_at"])
-            set_url_important(inserted["id"], record["important"])
+            _set_url_created_at_on(connection, inserted["id"], record["created_at"])
+            _set_url_important_on(connection, inserted["id"], record["important"])
+            after_stage("url_metadata")
             imported += 1
 
-    return {"imported": imported, "skipped": skipped, "groups": read_group_records()}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "groups": _read_group_records_on(connection),
+    }
+
+
+def _insert_import_url_on(
+    connection: Connection,
+    record: ImportURLRecord,
+) -> URLRecord | None:
+    row = (
+        connection.execute(
+            pg_insert(urls_table)
+            .values(url=record["url"], title=record["title"])
+            .on_conflict_do_nothing(index_elements=[urls_table.c.url])
+            .returning(*urls_table.c)
+        )
+        .mappings()
+        .first()
+    )
+    return _url_record(row) if row is not None else None
 
 
 def _group_record(
@@ -1108,44 +1218,15 @@ def create_group(
 
     The new group is appended after its new siblings.
     """
-    normalized_domains = normalize_domains(domains)
     try:
-        with get_connection() as connection:
-            with connection.begin():
-                duplicate = connection.execute(
-                    select(groups_table.c.id).where(
-                        _case_insensitive_match(groups_table.c.name, name)
-                    )
-                ).first()
-                if duplicate:
-                    return None, GROUP_NAME_CONFLICT
-
-                # Before `_validate_parent`, which takes row locks: set locks
-                # first everywhere keeps the acquisition order consistent
-                # between this and a concurrent move.
-                _lock_sibling_sets(connection, parent_id)
-                parent_error = _validate_parent(connection, parent_id)
-                if parent_error is not None:
-                    return None, parent_error
-
-                result = connection.execute(
-                    insert(groups_table).values(
-                        name=name,
-                        parent_id=parent_id,
-                        position=len(_sibling_ids(connection, parent_id)),
-                        nsfw=nsfw,
-                    )
-                )
-                group_id = _primary_key_id(result.inserted_primary_key)
-                _insert_group_domains(connection, group_id, normalized_domains)
-                row = (
-                    connection.execute(
-                        _group_record_select().where(groups_table.c.id == group_id)
-                    )
-                    .mappings()
-                    .first()
-                )
-                stored_domains = _read_group_domains(connection, group_id)
+        with _bookmark_mutation() as connection:
+            return _create_group_on(
+                connection,
+                name,
+                nsfw=nsfw,
+                domains=domains,
+                parent_id=parent_id,
+            )
     except IntegrityError:
         return None, GROUP_NAME_CONFLICT
     except DBAPIError as error:
@@ -1153,6 +1234,49 @@ def create_group(
         if hierarchy_error is None:
             raise
         return None, hierarchy_error
+
+
+def _create_group_on(
+    connection: Connection,
+    name: str,
+    *,
+    nsfw: bool = False,
+    domains: Sequence[str] = (),
+    parent_id: int | None = None,
+) -> AddGroupResult:
+    normalized_domains = normalize_domains(domains)
+    duplicate = connection.execute(
+        select(groups_table.c.id).where(
+            _case_insensitive_match(groups_table.c.name, name)
+        )
+    ).first()
+    if duplicate:
+        return None, GROUP_NAME_CONFLICT
+
+    # Before `_validate_parent`, which takes row locks: set locks first
+    # everywhere keeps the acquisition order consistent between this and a
+    # concurrent move.
+    _lock_sibling_sets(connection, parent_id)
+    parent_error = _validate_parent(connection, parent_id)
+    if parent_error is not None:
+        return None, parent_error
+
+    result = connection.execute(
+        insert(groups_table).values(
+            name=name,
+            parent_id=parent_id,
+            position=len(_sibling_ids(connection, parent_id)),
+            nsfw=nsfw,
+        )
+    )
+    group_id = _primary_key_id(result.inserted_primary_key)
+    _insert_group_domains(connection, group_id, normalized_domains)
+    row = (
+        connection.execute(_group_record_select().where(groups_table.c.id == group_id))
+        .mappings()
+        .first()
+    )
+    stored_domains = _read_group_domains(connection, group_id)
     if row is None:
         raise RuntimeError("Inserted group could not be read.")
     return _group_record(row, stored_domains, []), None
@@ -1186,99 +1310,16 @@ def update_group(
     Metadata edits and a move are one transaction: either every requested
     change and every rewritten descendant path commits, or none does.
     """
-    normalized_domains = normalize_domains(domains) if domains is not None else None
     try:
-        with get_connection() as connection:
-            with connection.begin():
-                group = (
-                    connection.execute(
-                        select(
-                            groups_table.c.name,
-                            groups_table.c.parent_id,
-                            sql_cast(groups_table.c.path, Text).label("path"),
-                        )
-                        .where(groups_table.c.id == group_id)
-                        .with_for_update()
-                    )
-                    .mappings()
-                    .first()
-                )
-                if not group:
-                    return None, GROUP_NOT_FOUND
-                if _row_str(group, "name").lower() == "default":
-                    return None, DEFAULT_GROUP
-
-                values: dict[str, object] = {}
-                if name is not None:
-                    duplicate = connection.execute(
-                        select(groups_table.c.id).where(
-                            groups_table.c.id != group_id,
-                            _case_insensitive_match(groups_table.c.name, name),
-                        )
-                    ).first()
-                    if duplicate:
-                        return None, GROUP_NAME_CONFLICT
-                    values["name"] = name
-                if nsfw is not None:
-                    values["nsfw"] = nsfw
-
-                stored_parent = group["parent_id"]
-                old_parent_id = (
-                    None
-                    if stored_parent is None
-                    else _int_value(stored_parent, "parent id")
-                )
-                destination: int | None = old_parent_id
-                moving = False
-                if parent_id != UNCHANGED_PARENT:
-                    destination = parent_id
-                    moving = destination != old_parent_id
-
-                if moving:
-                    moved_path = _row_str(group, "path")
-                    # A move writes positions in both sets: the group is
-                    # appended to the destination and the set it left is
-                    # compacted.
-                    _lock_sibling_sets(connection, old_parent_id, destination)
-                    # Lock the subtree so a concurrent move of a descendant
-                    # cannot invalidate the depth and cycle checks below.
-                    connection.execute(
-                        select(groups_table.c.id)
-                        .where(_is_descendant_of(groups_table.c.path, moved_path))
-                        .with_for_update()
-                    ).all()
-                    parent_error = _validate_parent(
-                        connection,
-                        destination,
-                        moved_path=moved_path,
-                    )
-                    if parent_error is not None:
-                        return None, parent_error
-                    values["parent_id"] = destination
-                    values["position"] = len(_sibling_ids(connection, destination))
-
-                if values:
-                    connection.execute(
-                        update(groups_table)
-                        .where(groups_table.c.id == group_id)
-                        .values(**values)
-                    )
-                if moving:
-                    # The group has left its old sibling set, so what remains
-                    # there closes the gap.
-                    _write_group_order(
-                        connection, _sibling_ids(connection, old_parent_id)
-                    )
-                if normalized_domains is not None:
-                    _replace_group_domains(connection, group_id, normalized_domains)
-                updated = (
-                    connection.execute(
-                        _group_record_select().where(groups_table.c.id == group_id)
-                    )
-                    .mappings()
-                    .first()
-                )
-                updated_domains = _read_group_domains(connection, group_id)
+        with _bookmark_mutation() as connection:
+            return _update_group_on(
+                connection,
+                group_id,
+                name=name,
+                nsfw=nsfw,
+                domains=domains,
+                parent_id=parent_id,
+            )
     except IntegrityError:
         return None, GROUP_NAME_CONFLICT
     except DBAPIError as error:
@@ -1286,6 +1327,92 @@ def update_group(
         if hierarchy_error is None:
             raise
         return None, hierarchy_error
+
+
+def _update_group_on(
+    connection: Connection,
+    group_id: int,
+    *,
+    name: str | None = None,
+    nsfw: bool | None = None,
+    domains: Sequence[str] | None = None,
+    parent_id: ParentUpdate = UNCHANGED_PARENT,
+) -> UpdateGroupResult:
+    normalized_domains = normalize_domains(domains) if domains is not None else None
+    group = (
+        connection.execute(
+            select(
+                groups_table.c.name,
+                groups_table.c.parent_id,
+                sql_cast(groups_table.c.path, Text).label("path"),
+            )
+            .where(groups_table.c.id == group_id)
+            .with_for_update()
+        )
+        .mappings()
+        .first()
+    )
+    if not group:
+        return None, GROUP_NOT_FOUND
+    if _row_str(group, "name").lower() == "default":
+        return None, DEFAULT_GROUP
+
+    values: dict[str, object] = {}
+    if name is not None:
+        duplicate = connection.execute(
+            select(groups_table.c.id).where(
+                groups_table.c.id != group_id,
+                _case_insensitive_match(groups_table.c.name, name),
+            )
+        ).first()
+        if duplicate:
+            return None, GROUP_NAME_CONFLICT
+        values["name"] = name
+    if nsfw is not None:
+        values["nsfw"] = nsfw
+
+    stored_parent = group["parent_id"]
+    old_parent_id = (
+        None if stored_parent is None else _int_value(stored_parent, "parent id")
+    )
+    destination: int | None = old_parent_id
+    moving = False
+    if parent_id != UNCHANGED_PARENT:
+        destination = parent_id
+        moving = destination != old_parent_id
+
+    if moving:
+        moved_path = _row_str(group, "path")
+        _lock_sibling_sets(connection, old_parent_id, destination)
+        connection.execute(
+            select(groups_table.c.id)
+            .where(_is_descendant_of(groups_table.c.path, moved_path))
+            .with_for_update()
+        ).all()
+        parent_error = _validate_parent(
+            connection,
+            destination,
+            moved_path=moved_path,
+        )
+        if parent_error is not None:
+            return None, parent_error
+        values["parent_id"] = destination
+        values["position"] = len(_sibling_ids(connection, destination))
+
+    if values:
+        connection.execute(
+            update(groups_table).where(groups_table.c.id == group_id).values(**values)
+        )
+    if moving:
+        _write_group_order(connection, _sibling_ids(connection, old_parent_id))
+    if normalized_domains is not None:
+        _replace_group_domains(connection, group_id, normalized_domains)
+    updated = (
+        connection.execute(_group_record_select().where(groups_table.c.id == group_id))
+        .mappings()
+        .first()
+    )
+    updated_domains = _read_group_domains(connection, group_id)
 
     if updated is None:
         raise RuntimeError("Updated group could not be read.")
@@ -1301,108 +1428,100 @@ def delete_group(
     A group with children is refused: promoting or deleting a subtree on the
     user's behalf would be a bigger decision than the one they made.
     """
-    with get_connection() as connection:
-        with connection.begin():
-            group = (
-                connection.execute(
-                    select(groups_table.c.name, groups_table.c.parent_id)
-                    .where(groups_table.c.id == group_id)
-                    .with_for_update()
-                )
-                .mappings()
-                .first()
-            )
-            if not group:
-                return None, GROUP_NOT_FOUND
-            if _row_str(group, "name").lower() == "default":
-                return None, DEFAULT_GROUP
+    with _bookmark_mutation() as connection:
+        return _delete_group_on(connection, group_id, url_action)
 
-            stored_parent = group["parent_id"]
-            parent_id = (
-                None
-                if stored_parent is None
-                else _int_value(stored_parent, "parent id")
-            )
-            has_children = connection.execute(
-                select(groups_table.c.id)
-                .where(groups_table.c.parent_id == group_id)
-                .limit(1)
-            ).first()
-            if has_children:
-                return None, GROUP_HAS_CHILDREN
 
-            # Deleting compacts the former siblings, so it renumbers the set
-            # exactly like an append does and has to queue behind one.
-            _lock_sibling_sets(connection, parent_id)
+def _delete_group_on(
+    connection: Connection,
+    group_id: int,
+    url_action: Literal["delete", "move_to_default"],
+) -> DeleteGroupStorageResult:
+    group = (
+        connection.execute(
+            select(groups_table.c.name, groups_table.c.parent_id)
+            .where(groups_table.c.id == group_id)
+            .with_for_update()
+        )
+        .mappings()
+        .first()
+    )
+    if not group:
+        return None, GROUP_NOT_FOUND
+    if _row_str(group, "name").lower() == "default":
+        return None, DEFAULT_GROUP
 
-            moved = 0
-            deleted_count = 0
-            if url_action == "move_to_default":
-                default_group_id = connection.scalar(
-                    select(groups_table.c.id).where(
-                        _case_insensitive_match(groups_table.c.name, "default")
-                    )
-                )
-                if default_group_id is None:
-                    raise RuntimeError("Default group is missing.")
-                default_id = _int_value(default_group_id, "default group id")
-                # RETURNING rather than rowcount: SQLAlchemy only pre-caches
-                # rowcount for UPDATE/DELETE, so an INSERT reports -1 once its
-                # cursor is closed. The returned rows are exactly the
-                # memberships that did not already exist.
-                move_result = connection.execute(
-                    pg_insert(url_groups_table)
-                    .from_select(
-                        ["url_id", "group_id"],
-                        select(
-                            url_groups_table.c.url_id,
-                            literal(default_id),
-                        ).where(url_groups_table.c.group_id == group_id),
-                    )
-                    .on_conflict_do_nothing()
-                    .returning(url_groups_table.c.url_id)
-                )
-                moved = len(move_result.all())
-                connection.execute(
-                    delete(url_groups_table).where(
-                        url_groups_table.c.group_id == group_id
-                    )
-                )
-            else:
-                delete_result = connection.execute(
-                    delete(urls_table).where(
-                        exists(
-                            select(url_groups_table.c.url_id).where(
-                                url_groups_table.c.url_id == urls_table.c.id,
-                                url_groups_table.c.group_id == group_id,
-                            )
-                        ),
-                        ~exists(
-                            select(url_groups_table.c.url_id).where(
-                                url_groups_table.c.url_id == urls_table.c.id,
-                                url_groups_table.c.group_id != group_id,
-                            )
-                        ),
-                    )
-                )
-                deleted_count = delete_result.rowcount
-                connection.execute(
-                    delete(url_groups_table).where(
-                        url_groups_table.c.group_id == group_id
-                    )
-                )
+    stored_parent = group["parent_id"]
+    parent_id = (
+        None if stored_parent is None else _int_value(stored_parent, "parent id")
+    )
+    has_children = connection.execute(
+        select(groups_table.c.id).where(groups_table.c.parent_id == group_id).limit(1)
+    ).first()
+    if has_children:
+        return None, GROUP_HAS_CHILDREN
 
-            connection.execute(
-                delete(group_domains_table).where(
-                    group_domains_table.c.group_id == group_id
-                )
+    # The bookmark gate is already held before this positional lock.
+    _lock_sibling_sets(connection, parent_id)
+
+    moved = 0
+    deleted_count = 0
+    if url_action == "move_to_default":
+        default_group_id = connection.scalar(
+            select(groups_table.c.id).where(
+                _case_insensitive_match(groups_table.c.name, "default")
             )
-            connection.execute(
-                delete(groups_table).where(groups_table.c.id == group_id)
+        )
+        if default_group_id is None:
+            raise RuntimeError("Default group is missing.")
+        default_id = _int_value(default_group_id, "default group id")
+        # RETURNING rather than rowcount: SQLAlchemy only pre-caches rowcount
+        # for UPDATE/DELETE, so an INSERT reports -1 once its cursor is closed.
+        move_result = connection.execute(
+            pg_insert(url_groups_table)
+            .from_select(
+                ["url_id", "group_id"],
+                select(
+                    url_groups_table.c.url_id,
+                    literal(default_id),
+                ).where(url_groups_table.c.group_id == group_id),
             )
-            # Only the deleted group's own siblings close the gap; every other
-            # sibling set is numbered independently.
-            _write_group_order(connection, _sibling_ids(connection, parent_id))
+            .on_conflict_do_nothing()
+            .returning(url_groups_table.c.url_id)
+        )
+        moved = len(move_result.all())
+        connection.execute(
+            delete(url_groups_table).where(url_groups_table.c.group_id == group_id)
+        )
+    else:
+        delete_result = connection.execute(
+            delete(urls_table).where(
+                exists(
+                    select(url_groups_table.c.url_id).where(
+                        url_groups_table.c.url_id == urls_table.c.id,
+                        url_groups_table.c.group_id == group_id,
+                    )
+                ),
+                ~exists(
+                    select(url_groups_table.c.url_id).where(
+                        url_groups_table.c.url_id == urls_table.c.id,
+                        url_groups_table.c.group_id != group_id,
+                    )
+                ),
+            )
+        )
+        deleted_count = delete_result.rowcount
+        connection.execute(
+            delete(url_groups_table).where(url_groups_table.c.group_id == group_id)
+        )
+
+    connection.execute(
+        delete(group_domains_table).where(group_domains_table.c.group_id == group_id)
+    )
+    connection.execute(delete(groups_table).where(groups_table.c.id == group_id))
+    # Only the deleted group's own siblings close the gap; every other sibling
+    # set is numbered independently.
+    _write_group_order(connection, _sibling_ids(connection, parent_id))
 
     return (
         {
@@ -1415,43 +1534,68 @@ def delete_group(
     )
 
 
-def _set_group_nsfw(group_id: int, nsfw: bool) -> None:
-    with get_connection() as connection:
-        with connection.begin():
-            connection.execute(
-                update(groups_table)
-                .where(groups_table.c.id == group_id)
-                .values(nsfw=nsfw)
-            )
+def _set_group_nsfw_on(
+    connection: Connection,
+    group_id: int,
+    nsfw: bool,
+) -> None:
+    connection.execute(
+        update(groups_table).where(groups_table.c.id == group_id).values(nsfw=nsfw)
+    )
 
 
-def _set_group_domains(group_id: int, domains: Sequence[str]) -> None:
-    with get_connection() as connection:
-        with connection.begin():
-            _replace_group_domains(connection, group_id, domains)
+def _set_group_domains(  # pyright: ignore[reportUnusedFunction]
+    group_id: int,
+    domains: Sequence[str],
+) -> None:
+    """Replace group domains through the legacy internal transaction boundary."""
+    with _bookmark_mutation() as connection:
+        _set_group_domains_on(connection, group_id, domains)
+
+
+def _set_group_domains_on(
+    connection: Connection,
+    group_id: int,
+    domains: Sequence[str],
+) -> None:
+    _replace_group_domains(connection, group_id, domains)
 
 
 def update_url_created_at(url_id: int, created_at: datetime) -> None:
-    with get_connection() as connection:
-        with connection.begin():
-            connection.execute(
-                update(urls_table)
-                .where(urls_table.c.id == url_id)
-                .values(created_at=created_at)
-            )
+    with _bookmark_mutation() as connection:
+        _set_url_created_at_on(connection, url_id, created_at)
+
+
+def _set_url_created_at_on(
+    connection: Connection,
+    url_id: int,
+    created_at: datetime,
+) -> None:
+    connection.execute(
+        update(urls_table)
+        .where(urls_table.c.id == url_id)
+        .values(created_at=created_at)
+    )
 
 
 def update_url_title(url_id: int, title: str) -> URLRecord | None:
-    with get_connection() as connection:
-        with connection.begin():
-            result = connection.execute(
-                update(urls_table)
-                .where(urls_table.c.id == url_id)
-                .values(title=title, version=urls_table.c.version + 1)
-            )
-            if result.rowcount != 1:
-                return None
-            updated = _url_record_by_id(connection, url_id)
+    with _bookmark_mutation() as connection:
+        return _update_url_title_on(connection, url_id, title)
+
+
+def _update_url_title_on(
+    connection: Connection,
+    url_id: int,
+    title: str,
+) -> URLRecord | None:
+    result = connection.execute(
+        update(urls_table)
+        .where(urls_table.c.id == url_id)
+        .values(title=title, version=urls_table.c.version + 1)
+    )
+    if result.rowcount != 1:
+        return None
+    updated = _url_record_by_id(connection, url_id)
     return _url_record(updated) if updated is not None else None
 
 
@@ -1465,91 +1609,113 @@ def update_url_record(
     if not fields:
         raise ValueError("At least one URL field is required.")
 
-    values: dict[str, object] = dict(fields)
-    values["version"] = urls_table.c.version + 1
     try:
-        with get_connection() as connection:
-            with connection.begin():
-                result = connection.execute(
-                    update(urls_table)
-                    .where(
-                        urls_table.c.id == url_id,
-                        urls_table.c.version == expected_version,
-                    )
-                    .values(**values)
-                )
-                if result.rowcount != 1:
-                    existing = connection.execute(
-                        select(urls_table.c.id).where(urls_table.c.id == url_id)
-                    ).first()
-                    if existing is None:
-                        return None, URL_NOT_FOUND
-                    return None, URL_VERSION_CONFLICT
-                updated = _url_record_by_id(connection, url_id)
+        with _bookmark_mutation() as connection:
+            return _update_url_record_on(
+                connection,
+                url_id,
+                expected_version=expected_version,
+                fields=fields,
+            )
     except IntegrityError:
         return None, URL_CONFLICT
 
+
+def _update_url_record_on(
+    connection: Connection,
+    url_id: int,
+    *,
+    expected_version: int,
+    fields: UpdateURLFields,
+) -> UpdateURLResult:
+    values: dict[str, object] = dict(fields)
+    values["version"] = urls_table.c.version + 1
+    result = connection.execute(
+        update(urls_table)
+        .where(
+            urls_table.c.id == url_id,
+            urls_table.c.version == expected_version,
+        )
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        existing = connection.execute(
+            select(urls_table.c.id).where(urls_table.c.id == url_id)
+        ).first()
+        if existing is None:
+            return None, URL_NOT_FOUND
+        return None, URL_VERSION_CONFLICT
+    updated = _url_record_by_id(connection, url_id)
     if updated is None:
         raise RuntimeError("Updated URL could not be read.")
     return _url_record(updated), None
 
 
 def set_url_important(url_id: int, important: bool) -> URLRecord | None:
-    with get_connection() as connection:
-        with connection.begin():
-            result = connection.execute(
-                update(urls_table)
-                .where(urls_table.c.id == url_id)
-                .values(important=important)
-            )
-            if result.rowcount != 1:
-                return None
-            updated = _url_record_by_id(connection, url_id)
+    with _bookmark_mutation() as connection:
+        return _set_url_important_on(connection, url_id, important)
+
+
+def _set_url_important_on(
+    connection: Connection,
+    url_id: int,
+    important: bool,
+) -> URLRecord | None:
+    result = connection.execute(
+        update(urls_table).where(urls_table.c.id == url_id).values(important=important)
+    )
+    if result.rowcount != 1:
+        return None
+    updated = _url_record_by_id(connection, url_id)
     return _url_record(updated) if updated is not None else None
 
 
 def add_url(url: str, title: str | None = None) -> URLRecord | None:
     """Insert a URL, returning its record or None if it already existed."""
     try:
-        with get_connection() as connection:
-            with connection.begin():
-                domain = domain_for_url(url)
-                matching_group_ids = (
-                    list(
-                        connection.execute(
-                            select(group_domains_table.c.group_id).where(
-                                group_domains_table.c.domain == domain
-                            )
-                        ).scalars()
-                    )
-                    if domain is not None
-                    else []
-                )
-                if not matching_group_ids:
-                    default_group_id = connection.scalar(
-                        select(groups_table.c.id).where(
-                            groups_table.c.name == "default"
-                        )
-                    )
-                    if default_group_id is None:
-                        raise RuntimeError("Default group is missing.")
-                    matching_group_ids = [default_group_id]
-                result = connection.execute(
-                    insert(urls_table).values(
-                        url=url,
-                        title=title,
-                    )
-                )
-                url_id = _primary_key_id(result.inserted_primary_key)
-                for group_id_value in matching_group_ids:
-                    _insert_url_group(
-                        connection,
-                        url_id,
-                        _int_value(group_id_value, "matched group id"),
-                    )
+        with _bookmark_mutation() as connection:
+            return _add_url_on(connection, url, title=title)
     except IntegrityError:
         return None
-    return read_url_record_by_id(url_id)
+
+
+def _add_url_on(
+    connection: Connection,
+    url: str,
+    *,
+    title: str | None = None,
+) -> URLRecord:
+    domain = domain_for_url(url)
+    matching_group_ids = (
+        list(
+            connection.execute(
+                select(group_domains_table.c.group_id).where(
+                    group_domains_table.c.domain == domain
+                )
+            ).scalars()
+        )
+        if domain is not None
+        else []
+    )
+    if not matching_group_ids:
+        default_group_id = connection.scalar(
+            select(groups_table.c.id).where(groups_table.c.name == "default")
+        )
+        if default_group_id is None:
+            raise RuntimeError("Default group is missing.")
+        matching_group_ids = [default_group_id]
+    result = connection.execute(insert(urls_table).values(url=url, title=title))
+    url_id = _primary_key_id(result.inserted_primary_key)
+    for group_id_value in matching_group_ids:
+        _insert_url_group(
+            connection,
+            url_id,
+            _int_value(group_id_value, "matched group id"),
+        )
+    row = _url_record_by_id(connection, url_id)
+    if row is None:
+        raise RuntimeError("Inserted URL could not be read.")
+    return _url_record(row)
 
 
 def move_url_to_group(
@@ -1562,45 +1728,58 @@ def move_url_to_group(
     The source may be omitted only when the URL currently belongs to exactly
     one group. Existing memberships in every other group remain untouched.
     """
-    with get_connection() as connection:
-        with connection.begin():
-            row = _url_record_by_id(connection, url_id)
-            if not row:
-                return None, MOVE_URL_NOT_FOUND
+    with _bookmark_mutation() as connection:
+        return _move_url_to_group_on(
+            connection,
+            url_id,
+            group_id,
+            source_group_id=source_group_id,
+        )
 
-            group = connection.execute(
-                select(groups_table.c.id).where(groups_table.c.id == group_id)
-            ).first()
-            if not group:
-                return None, MOVE_GROUP_NOT_FOUND
 
-            current_group_ids = list(
-                connection.execute(
-                    select(url_groups_table.c.group_id).where(
-                        url_groups_table.c.url_id == url_id
-                    )
-                ).scalars()
+def _move_url_to_group_on(
+    connection: Connection,
+    url_id: int,
+    group_id: int,
+    *,
+    source_group_id: int | None = None,
+) -> MoveURLGroupResult:
+    row = _url_record_by_id(connection, url_id)
+    if not row:
+        return None, MOVE_URL_NOT_FOUND
+
+    group = connection.execute(
+        select(groups_table.c.id).where(groups_table.c.id == group_id)
+    ).first()
+    if not group:
+        return None, MOVE_GROUP_NOT_FOUND
+
+    current_group_ids = list(
+        connection.execute(
+            select(url_groups_table.c.group_id).where(
+                url_groups_table.c.url_id == url_id
             )
-            if source_group_id is None:
-                if len(current_group_ids) != 1:
-                    return None, MOVE_SOURCE_REQUIRED
-                source_group_id = _int_value(current_group_ids[0], "source group id")
-            if source_group_id not in current_group_ids:
-                return None, MOVE_SOURCE_NOT_FOUND
-            if source_group_id == group_id:
-                return {
-                    "url": _url_record(row),
-                    "source_group_id": source_group_id,
-                }, None
+        ).scalars()
+    )
+    if source_group_id is None:
+        if len(current_group_ids) != 1:
+            return None, MOVE_SOURCE_REQUIRED
+        source_group_id = _int_value(current_group_ids[0], "source group id")
+    if source_group_id not in current_group_ids:
+        return None, MOVE_SOURCE_NOT_FOUND
+    if source_group_id == group_id:
+        return {
+            "url": _url_record(row),
+            "source_group_id": source_group_id,
+        }, None
 
-            _insert_url_group(connection, url_id, group_id)
-            connection.execute(
-                delete(url_groups_table).where(
-                    url_groups_table.c.url_id == url_id,
-                    url_groups_table.c.group_id == source_group_id,
-                )
-            )
-
+    _insert_url_group(connection, url_id, group_id)
+    connection.execute(
+        delete(url_groups_table).where(
+            url_groups_table.c.url_id == url_id,
+            url_groups_table.c.group_id == source_group_id,
+        )
+    )
     return {
         "url": _url_record(row),
         "source_group_id": source_group_id,
@@ -1617,19 +1796,23 @@ def _insert_url_group(connection: Connection, url_id: int, group_id: int) -> boo
     return result.first() is not None
 
 
-def _add_url_to_group(url_id: int, group_id: int) -> None:
-    with get_connection() as connection:
-        with connection.begin():
-            _insert_url_group(connection, url_id, group_id)
+def _add_url_to_group_on(
+    connection: Connection,
+    url_id: int,
+    group_id: int,
+) -> None:
+    _insert_url_group(connection, url_id, group_id)
 
 
-def _set_url_group(url_id: int, group_id: int) -> None:
-    with get_connection() as connection:
-        with connection.begin():
-            connection.execute(
-                delete(url_groups_table).where(url_groups_table.c.url_id == url_id)
-            )
-            _insert_url_group(connection, url_id, group_id)
+def _set_url_group_on(
+    connection: Connection,
+    url_id: int,
+    group_id: int,
+) -> None:
+    connection.execute(
+        delete(url_groups_table).where(url_groups_table.c.url_id == url_id)
+    )
+    _insert_url_group(connection, url_id, group_id)
 
 
 def update_group_order(parent_id: int | None, group_ids: Sequence[int]) -> bool:
@@ -1640,31 +1823,32 @@ def update_group_order(parent_id: int | None, group_ids: Sequence[int]) -> bool:
     an ID from another parent is as invalid as an unknown one.
     """
     try:
-        with get_connection() as connection:
-            with connection.begin():
-                # Reordering rewrites every position in the set, so it takes
-                # the same lock: the membership it validates against must be
-                # the membership it renumbers.
-                _lock_sibling_sets(connection, parent_id)
-                # A parent that does not exist has no children, so an empty
-                # order would otherwise match its empty sibling set and report
-                # success for a set that is not there.
-                if parent_id is not None:
-                    parent = connection.execute(
-                        select(groups_table.c.id).where(groups_table.c.id == parent_id)
-                    ).first()
-                    if parent is None:
-                        return False
-
-                existing_ids = _sibling_ids(connection, parent_id)
-                if len(group_ids) != len(existing_ids):
-                    return False
-                if set(group_ids) != set(existing_ids):
-                    return False
-
-                _write_group_order(connection, group_ids)
+        with _bookmark_mutation() as connection:
+            return _update_group_order_on(connection, parent_id, group_ids)
     except IntegrityError:
         return False
+
+
+def _update_group_order_on(
+    connection: Connection,
+    parent_id: int | None,
+    group_ids: Sequence[int],
+) -> bool:
+    _lock_sibling_sets(connection, parent_id)
+    if parent_id is not None:
+        parent = connection.execute(
+            select(groups_table.c.id).where(groups_table.c.id == parent_id)
+        ).first()
+        if parent is None:
+            return False
+
+    existing_ids = _sibling_ids(connection, parent_id)
+    if len(group_ids) != len(existing_ids):
+        return False
+    if set(group_ids) != set(existing_ids):
+        return False
+
+    _write_group_order(connection, group_ids)
     return True
 
 
@@ -1688,28 +1872,36 @@ def _write_group_order(
 
 def remove_url_by_id(url_id: int, group_id: int) -> URLRecord | None:
     """Remove a URL from one group, deleting the URL after its last membership."""
-    record = read_url_record_by_id(url_id)
-    if not record:
+    with _bookmark_mutation() as connection:
+        return _remove_url_by_id_on(connection, url_id, group_id)
+
+
+def _remove_url_by_id_on(
+    connection: Connection,
+    url_id: int,
+    group_id: int,
+) -> URLRecord | None:
+    row = _url_record_by_id(connection, url_id)
+    if row is None:
+        return None
+    record = _url_record(row)
+
+    current_group_ids = list(
+        connection.execute(
+            select(url_groups_table.c.group_id).where(
+                url_groups_table.c.url_id == url_id
+            )
+        ).scalars()
+    )
+    if group_id not in current_group_ids:
         return None
 
-    with get_connection() as connection:
-        with connection.begin():
-            current_group_ids = list(
-                connection.execute(
-                    select(url_groups_table.c.group_id).where(
-                        url_groups_table.c.url_id == url_id
-                    )
-                ).scalars()
-            )
-            if group_id not in current_group_ids:
-                return None
-
-            connection.execute(
-                delete(url_groups_table).where(
-                    url_groups_table.c.url_id == url_id,
-                    url_groups_table.c.group_id == group_id,
-                )
-            )
-            if len(current_group_ids) == 1:
-                connection.execute(delete(urls_table).where(urls_table.c.id == url_id))
+    connection.execute(
+        delete(url_groups_table).where(
+            url_groups_table.c.url_id == url_id,
+            url_groups_table.c.group_id == group_id,
+        )
+    )
+    if len(current_group_ids) == 1:
+        connection.execute(delete(urls_table).where(urls_table.c.id == url_id))
     return record

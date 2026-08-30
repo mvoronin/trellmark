@@ -1,4 +1,4 @@
-import { clearSession as apiClearSession, createGroup as apiCreateGroup, createUrl as apiCreateUrl, deleteGroup as apiDeleteGroup, deleteUrlById as apiDeleteUrlById, editGroup as apiEditGroup, editUrl as apiEditUrl, exportData as apiExportData, importData as apiImportData, establishSession as apiEstablishSession, getSession as apiGetSession, listGroups as apiListGroups, login as apiLogin, logout as apiLogout, moveUrlToGroup as apiMoveUrlToGroup, reorderGroups as apiReorderGroups, refreshUrlMetadata as apiRefreshUrlMetadata, setUrlImportant as apiSetUrlImportant, siteIconPath, setSessionExpiredHandler, } from "./api.js";
+import { clearSession as apiClearSession, createGroup as apiCreateGroup, createUrl as apiCreateUrl, deleteGroup as apiDeleteGroup, deleteUrlById as apiDeleteUrlById, editGroup as apiEditGroup, editUrl as apiEditUrl, exportData as apiExportData, importData as apiImportData, isImportApiError, establishSession as apiEstablishSession, getSession as apiGetSession, listGroups as apiListGroups, login as apiLogin, logout as apiLogout, moveUrlToGroup as apiMoveUrlToGroup, reorderGroups as apiReorderGroups, refreshUrlMetadata as apiRefreshUrlMetadata, setUrlImportant as apiSetUrlImportant, siteIconPath, setSessionExpiredHandler, } from "./api.js";
 function requiredElement(selector) {
     const element = document.querySelector(selector);
     if (!element) {
@@ -37,6 +37,7 @@ const groupButton = requiredElement("#group-button");
 const groupStatus = requiredElement("#group-status");
 const exportButton = requiredElement("#export-button");
 const importInput = requiredElement("#import-input");
+const importRetryButton = requiredElement("#import-retry-button");
 const urlClear = requiredElement("#url-clear");
 const groupFilterButtons = document.querySelectorAll(".group-filter [data-group-filter]");
 const groupEditDialog = requiredElement("#group-edit-dialog");
@@ -145,6 +146,10 @@ function formatAdded(createdAt) {
 let groups = [];
 let groupFilter = "safe";
 let initialGroupsLoad = Promise.resolve();
+let pendingImportFile = null;
+let pendingImportRetryable = false;
+let importRequestInFlight = false;
+let importRequestSerial = 0;
 // Fold state is a browser-only preference: the set of folded group ids, kept
 // in localStorage. Groups absent from the set render unfolded, so newly created
 // groups start open.
@@ -619,36 +624,82 @@ async function exportData() {
         exportButton.disabled = false;
     }
 }
+function syncImportControls() {
+    importInput.disabled = importRequestInFlight;
+    importRetryButton.hidden = !pendingImportRetryable;
+    importRetryButton.disabled = importRequestInFlight || !pendingImportRetryable;
+}
+function setImportRetryState(file, retryable) {
+    pendingImportFile = file;
+    pendingImportRetryable = file !== null && retryable;
+    syncImportControls();
+}
 async function importData(file) {
+    if (importRequestInFlight) {
+        return;
+    }
+    const requestSerial = ++importRequestSerial;
+    importRequestInFlight = true;
     setStatus("");
-    importInput.disabled = true;
+    syncImportControls();
     try {
         await initialGroupsLoad.catch(() => undefined);
-        const data = await apiImportData(await file.text());
+        const document = await file.text();
+        if (requestSerial !== importRequestSerial) {
+            return;
+        }
+        const data = await apiImportData(document);
+        if (requestSerial !== importRequestSerial) {
+            return;
+        }
         renderGroups(data.groups);
+        importInput.value = "";
+        setImportRetryState(null, false);
         setStatus(`Imported ${data.imported}, skipped ${data.skipped}.`, "is-success");
     }
     catch (error) {
+        if (requestSerial !== importRequestSerial) {
+            return;
+        }
+        if (isImportApiError(error)) {
+            setImportRetryState(file, error.code === "import_conflict" || error.code === "import_failed");
+        }
         setStatus(errorMessage(error), "is-error");
     }
     finally {
-        importInput.value = "";
-        importInput.disabled = false;
+        if (requestSerial === importRequestSerial) {
+            importRequestInFlight = false;
+            syncImportControls();
+        }
     }
+}
+function retryPendingImport() {
+    if (pendingImportFile === null ||
+        !pendingImportRetryable ||
+        importRequestInFlight) {
+        return;
+    }
+    void importData(pendingImportFile);
 }
 exportButton.addEventListener("click", exportData);
 importInput.addEventListener("change", () => {
     const [file] = importInput.files ?? [];
     if (file) {
-        importData(file);
+        setImportRetryState(file, false);
+        void importData(file);
     }
 });
+importRetryButton.addEventListener("click", retryPendingImport);
 async function loadGroups() {
     const data = await apiListGroups();
     renderGroups(data.groups);
 }
 function clearPrivateState() {
     groups = [];
+    importRequestSerial += 1;
+    importRequestInFlight = false;
+    importInput.value = "";
+    setImportRetryState(null, false);
     activeDrag = null;
     editingGroup = null;
     editingUrl = null;
@@ -673,7 +724,6 @@ function clearPrivateState() {
     groupForm.reset();
     groupEditForm.reset();
     urlEditForm.reset();
-    importInput.value = "";
     fillGroupSelect(groupParent, [], null);
     fillGroupSelect(groupEditParent, [], null);
     confirmUrl.textContent = "";

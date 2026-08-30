@@ -39,6 +39,14 @@ export type UrlRecord = components["schemas"]["URLRecord"];
 export type GroupRecord = components["schemas"]["GroupRecord"];
 export type GroupsPayload = JsonResponse<ListGroupsOperation, 200>;
 export type ImportPayload = JsonResponse<ImportOperation, 200>;
+export type ImportConflictPayload = JsonResponse<ImportOperation, 409>;
+export type InvalidImportPayload = JsonResponse<ImportOperation, 422>;
+export type ImportFailedPayload = JsonResponse<ImportOperation, 500>;
+export type ImportFailurePayload =
+  | ImportConflictPayload
+  | InvalidImportPayload
+  | ImportFailedPayload;
+export type ImportErrorCode = ImportFailurePayload["code"];
 export type ImportDataPayload = JsonRequest<ImportOperation>;
 export type CreateGroupPayload = JsonRequest<CreateGroupOperation>;
 export type EditGroupPayload = JsonRequest<EditGroupOperation>;
@@ -78,6 +86,25 @@ let sessionExpiredHandler: (() => void) | null = null;
 let expiryTransitionSent = false;
 
 export class SessionExpiredError extends Error {}
+
+type ImportErrorStatus = 409 | 422 | 500;
+
+export class ImportApiError extends Error {
+  readonly code: ImportErrorCode;
+
+  constructor(
+    readonly status: ImportErrorStatus,
+    readonly payload: ImportFailurePayload,
+  ) {
+    super(payload.error);
+    this.name = "ImportApiError";
+    this.code = payload.code;
+  }
+}
+
+export function isImportApiError(error: unknown): error is ImportApiError {
+  return error instanceof ImportApiError;
+}
 
 export function setSessionExpiredHandler(handler: () => void): void {
   sessionExpiredHandler = handler;
@@ -151,6 +178,7 @@ async function jsonRequest<ResponseBody>(
   init: RequestInit,
   fallbackError: string,
   authenticationRequired = true,
+  errorFactory?: (status: number, payload: unknown, fallback: string) => Error,
 ): Promise<ResponseBody> {
   const response = await fetch(path, { ...init, credentials: "same-origin" });
   const payload = await readJson(response);
@@ -159,9 +187,46 @@ async function jsonRequest<ResponseBody>(
     if (response.status === 401 && authenticationRequired) {
       throw expiredSessionError();
     }
+    if (errorFactory) {
+      throw errorFactory(response.status, payload, fallbackError);
+    }
     throw new Error(errorMessage(payload, fallbackError));
   }
   return payload as ResponseBody;
+}
+
+function hasImportErrorCode(
+  payload: unknown,
+  code: ImportErrorCode,
+): payload is ImportFailurePayload {
+  return (
+    payload !== null &&
+    typeof payload === "object" &&
+    "error" in payload &&
+    typeof payload.error === "string" &&
+    "code" in payload &&
+    payload.code === code
+  );
+}
+
+function importError(
+  status: number,
+  payload: unknown,
+  fallback: string,
+): Error {
+  if (
+    status === 409 &&
+    hasImportErrorCode(payload, "import_conflict")
+  ) {
+    return new ImportApiError(status, payload as ImportConflictPayload);
+  }
+  if (status === 422 && hasImportErrorCode(payload, "invalid_import")) {
+    return new ImportApiError(status, payload as InvalidImportPayload);
+  }
+  if (status === 500 && hasImportErrorCode(payload, "import_failed")) {
+    return new ImportApiError(status, payload as ImportFailedPayload);
+  }
+  return new Error(errorMessage(payload, fallback));
 }
 
 function jsonInit(method: "POST" | "PATCH" | "DELETE", body: unknown): RequestInit {
@@ -252,6 +317,8 @@ export async function importData(
       body: typeof body === "string" ? body : JSON.stringify(body),
     },
     "Could not import URLs.",
+    true,
+    importError,
   );
 }
 
