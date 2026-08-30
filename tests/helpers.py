@@ -229,8 +229,71 @@ def capture_storage_statements(monkeypatch):
     return statements, engine
 
 
+def capture_connection_identities(monkeypatch):
+    """Record DBAPI connection identities acquired through content storage."""
+    from trellmark import storage
+
+    engine = storage.get_engine()
+    identities = []
+
+    def recording_connection():
+        connection = engine.connect()
+        identities.append(id(connection.connection.dbapi_connection))
+        return connection
+
+    monkeypatch.setattr(storage, "get_connection", recording_connection)
+    return identities, engine
+
+
 def exported_without_timestamp(payload):
     return {key: value for key, value in payload.items() if key != "exported_at"}
+
+
+def logical_bookmark_snapshot():
+    """Return every durable bookmark value in deterministic row order."""
+    return {
+        "groups": db_query(
+            """
+            SELECT id, name, position, created_at, nsfw, parent_id, path::text
+            FROM groups
+            ORDER BY id
+            """
+        ),
+        "urls": db_query(
+            """
+            SELECT id, url, title, created_at, important, version
+            FROM urls
+            ORDER BY id
+            """
+        ),
+        "group_domains": db_query(
+            """
+            SELECT group_id, domain
+            FROM group_domains
+            ORDER BY group_id, domain
+            """
+        ),
+        "url_groups": db_query(
+            """
+            SELECT url_id, group_id
+            FROM url_groups
+            ORDER BY url_id, group_id
+            """
+        ),
+    }
+
+
+def public_bookmark_snapshot(base_url):
+    """Return the authenticated bookmark views with volatile export time removed."""
+    groups_status, groups = http_json(base_url, "/api/groups")
+    urls_status, urls = http_json(base_url, "/api/urls")
+    export_status, exported = http_json(base_url, "/api/export")
+    assert (groups_status, urls_status, export_status) == (200, 200, 200)
+    return {
+        "groups": groups,
+        "urls": urls,
+        "export": exported_without_timestamp(exported),
+    }
 
 
 @contextmanager

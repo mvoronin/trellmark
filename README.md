@@ -153,6 +153,39 @@ Do not widen Trellmark's loopback bind as a substitute for configuring the
 shared proxy. The `/internal/ready` endpoint is intended only for the container
 health check and must not be exposed by the edge.
 
+## Import and export
+
+Trellmark JSON export is a portable content format. A supported, valid import
+is applied all-or-nothing: either the complete bookmark document is committed,
+or none of its changes are kept. Existing duplicate URLs remain successful
+skips and are included in the response's skipped count. Invalid documents and
+failures during an import leave the existing bookmark data unchanged.
+
+If another bookmark change is already in progress, an import fails immediately
+with HTTP `409` and the `import_conflict` code. The browser keeps the current
+bookmark tree and selected file after `import_conflict` or `import_failed`; it
+does not retry automatically. Use **Retry import** to make one explicit retry.
+An `invalid_import` must be corrected and selected again before another attempt.
+
+### Why bookmark writes use an advisory gate
+
+Every logical bookmark writer first tries `pg_try_advisory_xact_lock`. This is a
+transaction-scoped, non-blocking gate across bookmark mutations. The first
+writer proceeds; an overlapping writer is rejected at a known point before
+sibling or row locks and before data changes begin. PostgreSQL releases the gate
+automatically when the transaction commits or rolls back, which lets imports map
+contention predictably to `409 import_conflict`.
+
+`SERIALIZABLE` isolation addresses a different concurrency problem. PostgreSQL's
+serializable snapshot isolation can let transactions run concurrently and abort
+one later, at a statement or at commit, with a serialization failure. It does
+not provide the immediate, pre-mutation first-wins response required by the API.
+Using it alone would also require transaction-retry handling and would change
+when callers observe conflicts. It could supplement the gate if a concrete
+write-skew case is found, but it would not replace the gate. The regular database
+transaction still provides atomic commit and rollback, while constraints enforce
+stored-data invariants.
+
 ## Backups
 
 Use PostgreSQL tools for durable backups. JSON export is a portable Trellmark

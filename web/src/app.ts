@@ -8,6 +8,7 @@ import {
   editUrl as apiEditUrl,
   exportData as apiExportData,
   importData as apiImportData,
+  isImportApiError,
   establishSession as apiEstablishSession,
   getSession as apiGetSession,
   listGroups as apiListGroups,
@@ -87,6 +88,9 @@ const groupButton = requiredElement<HTMLButtonElement>("#group-button");
 const groupStatus = requiredElement<HTMLParagraphElement>("#group-status");
 const exportButton = requiredElement<HTMLButtonElement>("#export-button");
 const importInput = requiredElement<HTMLInputElement>("#import-input");
+const importRetryButton = requiredElement<HTMLButtonElement>(
+  "#import-retry-button",
+);
 const urlClear = requiredElement<HTMLButtonElement>("#url-clear");
 const groupFilterButtons = document.querySelectorAll<HTMLButtonElement>(
   ".group-filter [data-group-filter]",
@@ -210,6 +214,10 @@ function formatAdded(createdAt: string): string {
 let groups: GroupRecord[] = [];
 let groupFilter: GroupFilter = "safe";
 let initialGroupsLoad: Promise<void> = Promise.resolve();
+let pendingImportFile: File | null = null;
+let pendingImportRetryable = false;
+let importRequestInFlight = false;
+let importRequestSerial = 0;
 
 // Fold state is a browser-only preference: the set of folded group ids, kept
 // in localStorage. Groups absent from the set render unfolded, so newly created
@@ -834,30 +842,81 @@ async function exportData(): Promise<void> {
   }
 }
 
+function syncImportControls(): void {
+  importInput.disabled = importRequestInFlight;
+  importRetryButton.hidden = !pendingImportRetryable;
+  importRetryButton.disabled = importRequestInFlight || !pendingImportRetryable;
+}
+
+function setImportRetryState(file: File | null, retryable: boolean): void {
+  pendingImportFile = file;
+  pendingImportRetryable = file !== null && retryable;
+  syncImportControls();
+}
+
 async function importData(file: File): Promise<void> {
+  if (importRequestInFlight) {
+    return;
+  }
+
+  const requestSerial = ++importRequestSerial;
+  importRequestInFlight = true;
   setStatus("");
-  importInput.disabled = true;
+  syncImportControls();
 
   try {
     await initialGroupsLoad.catch(() => undefined);
-    const data = await apiImportData(await file.text());
+    const document = await file.text();
+    if (requestSerial !== importRequestSerial) {
+      return;
+    }
+    const data = await apiImportData(document);
+    if (requestSerial !== importRequestSerial) {
+      return;
+    }
     renderGroups(data.groups);
+    importInput.value = "";
+    setImportRetryState(null, false);
     setStatus(`Imported ${data.imported}, skipped ${data.skipped}.`, "is-success");
   } catch (error) {
+    if (requestSerial !== importRequestSerial) {
+      return;
+    }
+    if (isImportApiError(error)) {
+      setImportRetryState(
+        file,
+        error.code === "import_conflict" || error.code === "import_failed",
+      );
+    }
     setStatus(errorMessage(error), "is-error");
   } finally {
-    importInput.value = "";
-    importInput.disabled = false;
+    if (requestSerial === importRequestSerial) {
+      importRequestInFlight = false;
+      syncImportControls();
+    }
   }
+}
+
+function retryPendingImport(): void {
+  if (
+    pendingImportFile === null ||
+    !pendingImportRetryable ||
+    importRequestInFlight
+  ) {
+    return;
+  }
+  void importData(pendingImportFile);
 }
 
 exportButton.addEventListener("click", exportData);
 importInput.addEventListener("change", () => {
   const [file] = importInput.files ?? [];
   if (file) {
-    importData(file);
+    setImportRetryState(file, false);
+    void importData(file);
   }
 });
+importRetryButton.addEventListener("click", retryPendingImport);
 
 async function loadGroups(): Promise<void> {
   const data = await apiListGroups();
@@ -866,6 +925,10 @@ async function loadGroups(): Promise<void> {
 
 function clearPrivateState(): void {
   groups = [];
+  importRequestSerial += 1;
+  importRequestInFlight = false;
+  importInput.value = "";
+  setImportRetryState(null, false);
   activeDrag = null;
   editingGroup = null;
   editingUrl = null;
@@ -890,7 +953,6 @@ function clearPrivateState(): void {
   groupForm.reset();
   groupEditForm.reset();
   urlEditForm.reset();
-  importInput.value = "";
   fillGroupSelect(groupParent, [], null);
   fillGroupSelect(groupEditParent, [], null);
   confirmUrl.textContent = "";

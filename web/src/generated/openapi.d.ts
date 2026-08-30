@@ -430,6 +430,19 @@ export interface components {
              */
             status: "ok";
         };
+        /** ImportConflictResponse */
+        ImportConflictResponse: {
+            /**
+             * Code
+             * @constant
+             */
+            code: "import_conflict";
+            /**
+             * Error
+             * @constant
+             */
+            error: "Another bookmark change is in progress. No import changes were saved. Try again.";
+        };
         /** ImportDocument */
         ImportDocument: {
             /** Exported At */
@@ -441,6 +454,19 @@ export interface components {
              * @constant
              */
             version: 1;
+        };
+        /** ImportFailedResponse */
+        ImportFailedResponse: {
+            /**
+             * Code
+             * @constant
+             */
+            code: "import_failed";
+            /**
+             * Error
+             * @constant
+             */
+            error: "Import failed. No import changes were saved. Try again.";
         };
         /** ImportGroupRecord */
         ImportGroupRecord: {
@@ -482,6 +508,19 @@ export interface components {
             title?: string | null;
             /** Url */
             url: string;
+        };
+        /** InvalidImportResponse */
+        InvalidImportResponse: {
+            /**
+             * Code
+             * @constant
+             */
+            code: "invalid_import";
+            /**
+             * Error
+             * @constant
+             */
+            error: "Invalid import file.";
         };
         /** MoveURLGroup */
         MoveURLGroup: {
@@ -893,22 +932,65 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Successful Response */
+            /** @description Bookmark import completed. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
+                    /**
+                     * @example {
+                     *       "groups": [],
+                     *       "imported": 1,
+                     *       "skipped": 0
+                     *     }
+                     */
                     "application/json": components["schemas"]["ImportResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Another bookmark mutation currently owns the import gate. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "code": "import_conflict",
+                     *       "error": "Another bookmark change is in progress. No import changes were saved. Try again."
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ImportConflictResponse"];
+                };
+            };
+            /** @description The import document is invalid. */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    /**
+                     * @example {
+                     *       "code": "invalid_import",
+                     *       "error": "Invalid import file."
+                     *     }
+                     */
+                    "application/json": components["schemas"]["InvalidImportResponse"];
+                };
+            };
+            /** @description The import was rolled back after an unexpected failure. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "code": "import_failed",
+                     *       "error": "Import failed. No import changes were saved. Try again."
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ImportFailedResponse"];
                 };
             };
         };

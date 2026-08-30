@@ -347,6 +347,24 @@ class ImportResponse(ContractModel):
     groups: list[GroupRecord]
 
 
+class InvalidImportResponse(ContractModel):
+    error: Literal["Invalid import file."]
+    code: Literal["invalid_import"]
+
+
+class ImportConflictResponse(ContractModel):
+    error: Literal[
+        "Another bookmark change is in progress. "
+        "No import changes were saved. Try again."
+    ]
+    code: Literal["import_conflict"]
+
+
+class ImportFailedResponse(ContractModel):
+    error: Literal["Import failed. No import changes were saved. Try again."]
+    code: Literal["import_failed"]
+
+
 class DeleteURLByIDResponse(ContractModel):
     url: URLRecord
     urls: list[URLRecord]

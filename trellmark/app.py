@@ -2,8 +2,10 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import APIKeyCookie
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -55,7 +57,10 @@ from .models import (
     ExportDocument,
     GroupsResponse,
     HealthResponse,
+    ImportConflictResponse,
+    ImportFailedResponse,
     ImportResponse,
+    InvalidImportResponse,
     LoginRequest,
     MoveURLGroupResponse,
     RefreshURLMetadataResponse,
@@ -151,6 +156,70 @@ SITE_ICON_RESPONSES: dict[int | str, dict[str, Any]] = {
         },
     },
 }
+IMPORT_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "model": ImportResponse,
+        "description": "Bookmark import completed.",
+        "content": {
+            "application/json": {
+                "example": {"imported": 1, "skipped": 0, "groups": []},
+            }
+        },
+    },
+    409: {
+        "model": ImportConflictResponse,
+        "description": "Another bookmark mutation currently owns the import gate.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": (
+                        "Another bookmark change is in progress. "
+                        "No import changes were saved. Try again."
+                    ),
+                    "code": "import_conflict",
+                },
+            }
+        },
+    },
+    422: {
+        "model": InvalidImportResponse,
+        "description": "The import document is invalid.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": "Invalid import file.",
+                    "code": "invalid_import",
+                },
+            }
+        },
+    },
+    500: {
+        "model": ImportFailedResponse,
+        "description": "The import was rolled back after an unexpected failure.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": "Import failed. No import changes were saved. Try again.",
+                    "code": "import_failed",
+                },
+            }
+        },
+    },
+}
+
+
+async def _request_validation_exception_handler(
+    request: Request,
+    error: Exception,
+) -> JSONResponse:
+    if not isinstance(error, RequestValidationError):
+        raise error
+    if request.url.path == "/api/import":
+        payload = InvalidImportResponse.model_validate(
+            {"error": "Invalid import file.", "code": "invalid_import"}
+        )
+        return JSONResponse(payload.model_dump(), status_code=422)
+    return await request_validation_exception_handler(request, error)
 
 
 async def _serve_spa(spa_path: str = "") -> FileResponse:
@@ -265,6 +334,10 @@ def create_app(
         docs_url=None,
         redoc_url=None,
     )
+    app.add_exception_handler(
+        RequestValidationError,
+        _request_validation_exception_handler,
+    )
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_size=MAX_REQUEST_BODY_BYTES,
@@ -324,6 +397,7 @@ def create_app(
         import_data,
         methods=["POST"],
         response_model=ImportResponse,
+        responses=IMPORT_RESPONSES,
         dependencies=PROTECTED_DEPENDENCIES,
     )
     app.add_api_route(

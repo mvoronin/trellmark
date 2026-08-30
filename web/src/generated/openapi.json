@@ -429,6 +429,27 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "ImportConflictResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "const": "import_conflict",
+            "title": "Code",
+            "type": "string"
+          },
+          "error": {
+            "const": "Another bookmark change is in progress. No import changes were saved. Try again.",
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "title": "ImportConflictResponse",
+        "type": "object"
+      },
       "ImportDocument": {
         "additionalProperties": false,
         "properties": {
@@ -455,6 +476,27 @@
           "groups"
         ],
         "title": "ImportDocument",
+        "type": "object"
+      },
+      "ImportFailedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "const": "import_failed",
+            "title": "Code",
+            "type": "string"
+          },
+          "error": {
+            "const": "Import failed. No import changes were saved. Try again.",
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "title": "ImportFailedResponse",
         "type": "object"
       },
       "ImportGroupRecord": {
@@ -570,6 +612,27 @@
           "created_at"
         ],
         "title": "ImportURLRecord",
+        "type": "object"
+      },
+      "InvalidImportResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "const": "invalid_import",
+            "title": "Code",
+            "type": "string"
+          },
+          "error": {
+            "const": "Invalid import file.",
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "code"
+        ],
+        "title": "InvalidImportResponse",
         "type": "object"
       },
       "MoveURLGroup": {
@@ -1358,22 +1421,59 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "groups": [],
+                  "imported": 1,
+                  "skipped": 0
+                },
                 "schema": {
                   "$ref": "#/components/schemas/ImportResponse"
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Bookmark import completed."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": "import_conflict",
+                  "error": "Another bookmark change is in progress. No import changes were saved. Try again."
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ImportConflictResponse"
+                }
+              }
+            },
+            "description": "Another bookmark mutation currently owns the import gate."
           },
           "422": {
             "content": {
               "application/json": {
+                "example": {
+                  "code": "invalid_import",
+                  "error": "Invalid import file."
+                },
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/InvalidImportResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The import document is invalid."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "code": "import_failed",
+                  "error": "Import failed. No import changes were saved. Try again."
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ImportFailedResponse"
+                }
+              }
+            },
+            "description": "The import was rolled back after an unexpected failure."
           }
         },
         "security": [
