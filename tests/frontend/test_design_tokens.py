@@ -129,3 +129,85 @@ def test_frontend_has_no_horizontal_overflow_on_a_phone(app, page, theme):
     result = _measure(page, base_url, theme, 360)
 
     assert result["scrollWidth"] <= result["clientWidth"]
+
+
+# Keep the original application sampler and expectations intact. The overview
+# samples each visible text node separately, including every state and modal,
+# and accounts for ancestor opacity instead of deduplicating by class name.
+DESIGN_CONTRAST_JS = (
+    CONTRAST_JS.replace(
+        "const rows = [];",
+        """const opacityRatio = (el, foreground, background) => {
+          let fg = srgb(foreground), bg = srgb(background);
+          for (let node = el; node; node = node.parentElement) {
+            const opacity = Number(getComputedStyle(node).opacity);
+            if (opacity === 1) continue;
+            const behind = srgb(bgOf(node.parentElement));
+            fg = fg.map((value, i) => value * opacity + behind[i] * (1 - opacity));
+            bg = bg.map((value, i) => value * opacity + behind[i] * (1 - opacity));
+          }
+          return ratio(`rgb(${fg.join(' ')})`, `rgb(${bg.join(' ')})`);
+        };
+        const rows = [];""",
+    )
+    .replace(
+        'document.querySelectorAll("body *")',
+        'document.querySelectorAll(document.querySelector("dialog[open]") ? "dialog[open] *" : "body *")',
+    )
+    .replace(
+        "if (!el.textContent.trim() || el.children.length) continue;",
+        """if (!el.getClientRects().length || getComputedStyle(el).visibility === 'hidden') continue;
+        if (![...el.childNodes].some(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim())) continue;""",
+    )
+    .replace(
+        "const key = el.className || el.tagName;",
+        """const state = el.closest('[data-design-state]')?.dataset.designState || el.closest('dialog')?.id || 'frame';
+        const key = `${state}/${el.id || el.className || el.tagName}/${rows.length}`;""",
+    )
+    .replace(
+        "ratio: ratio(cs.color, bgOf(el)),",
+        "ratio: opacityRatio(el, cs.color, bgOf(el)),",
+    )
+    .replace(
+        "clientWidth: document.documentElement.clientWidth,",
+        """clientWidth: document.documentElement.clientWidth,
+        overflows: [...document.querySelectorAll('dialog[open], .design-section, .group, .url-item, .group-header')]
+          .filter(el => el.getClientRects().length && el.scrollWidth > el.clientWidth + 1)
+          .map(el => ({state: el.closest('[data-design-state]')?.dataset.designState || el.id,
+            className: el.className, scroll: el.scrollWidth, client: el.clientWidth})),""",
+    )
+)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width", [360, 1440])
+@pytest.mark.parametrize(
+    "dialog_id",
+    [
+        None,
+        "url-edit-dialog",
+        "group-edit-dialog",
+        "confirm-dialog",
+        "group-delete-dialog",
+    ],
+)
+def test_design_states_and_dialogs_have_contrast_and_no_overflow(
+    static_page, static_web_server, theme, width, dialog_id
+):
+    static_page.set_viewport_size({"width": width, "height": 900})
+    static_page.goto(f"{static_web_server}/design.html")
+    static_page.wait_for_selector("#groups .url-item")
+    static_page.locator(f'#app-view [data-theme-value="{theme}"]').click()
+    if dialog_id:
+        static_page.locator(f'[data-design-dialog="{dialog_id}"]').click()
+    result = static_page.evaluate(DESIGN_CONTRAST_JS)
+    assert result["rows"], "No component text was sampled"
+    failures = []
+    for row in result["rows"]:
+        large = row["px"] >= 24 or (row["px"] >= 18.66 and row["weight"] >= 700)
+        floor = 3.0 if large else 4.5
+        if row["ratio"] < floor:
+            failures.append(f"{row['what']}: {row['ratio']:.2f}:1 needs {floor}:1")
+    assert not failures, "\n".join(failures)
+    assert result["scrollWidth"] <= result["clientWidth"]
+    assert not result["overflows"], result["overflows"]

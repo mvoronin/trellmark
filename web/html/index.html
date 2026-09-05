@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trellmark</title>
+    <!-- The SVG is what any current browser uses; the ICO is the fallback for
+         the ones that ask for a raster. Both are declared under /static, which
+         this app already serves. A bare /favicon.ico at the origin root — what
+         a bookmark or a feed reader asks for with no link to go on — is the
+         edge's to answer, and the edge lives in the infrastructure repo. -->
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/static/favicon.ico" sizes="48x48 32x32 16x16">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+    <!-- Pin the saved theme before first paint so an explicit light/dark
+         choice doesn't flash the wrong colors. "system" needs nothing here —
+         color-scheme follows the OS. main.js keeps the toggle in sync. -->
+    <script>
+      try {
+        const stored = localStorage.getItem("theme");
+        if (stored === "light" || stored === "dark") {
+          document.documentElement.dataset.theme = stored;
+        }
+      } catch (error) {}
+    </script>
+    <!-- The two Latin subsets are needed for first paint on an English UI; the
+         Cyrillic ones load on demand via unicode-range. crossorigin is required
+         on font preloads even same-origin, or the fetch is made twice. -->
+    <link rel="preload" href="/static/fonts/golostext-400-700-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/ptsansnarrow-700-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/main.js" type="module"></script>
+  </head>
+  <body>
+<!-- include fragments/shell.html#authentication -->
+
+    <div id="app-view" hidden>
+<!-- include fragments/shell.html#toolbar -->
+
+    <main class="url-panel" aria-live="polite">
+<!-- include fragments/bookmark_forms.html#create_group -->
+      <div id="groups" class="groups"></div>
+    </main>
+
+<!-- include fragments/dialogs.html#confirm_url -->
+
+<!-- include fragments/dialogs.html#edit_group -->
+
+<!-- include fragments/dialogs.html#edit_url -->
+
+<!-- include fragments/dialogs.html#confirm_group -->
+    </div>
+  </body>
+</html>

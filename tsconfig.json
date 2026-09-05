@@ -11,5 +11,5 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["web/src/app.ts"]
+  "include": ["web/src/**/*.ts"]
 }

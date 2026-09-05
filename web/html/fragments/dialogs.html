@@ -1,0 +1,26 @@
+<!-- fragment-start confirm_url -->    <dialog id="confirm-dialog" class="confirm-dialog">
+      <p class="confirm-title">Delete this URL?</p>
+      <p class="confirm-url" id="confirm-url"></p>
+      <form method="dialog" class="confirm-actions">
+        <button value="cancel" class="confirm-cancel">Cancel</button>
+        <button value="delete" class="confirm-delete" autofocus>Delete</button>
+      </form>
+    </dialog><!-- fragment-end confirm_url -->
+
+<!-- fragment-start edit_group -->    <dialog id="group-edit-dialog" class="confirm-dialog group-edit-dialog">
+<!-- include fragments/bookmark_forms.html#edit_group -->
+    </dialog><!-- fragment-end edit_group -->
+
+<!-- fragment-start edit_url -->    <dialog id="url-edit-dialog" class="confirm-dialog">
+<!-- include fragments/bookmark_forms.html#edit_url -->
+    </dialog><!-- fragment-end edit_url -->
+
+<!-- fragment-start confirm_group -->    <dialog id="group-delete-dialog" class="confirm-dialog">
+      <p class="confirm-title">Delete <span id="group-delete-name"></span>?</p>
+      <p class="confirm-url" id="group-delete-summary"></p>
+      <form method="dialog" class="confirm-actions group-delete-actions">
+        <button value="cancel" class="confirm-cancel">Cancel</button>
+        <button value="move_to_default" class="confirm-save" autofocus>Move links to default</button>
+        <button value="delete" class="confirm-delete">Delete links</button>
+      </form>
+    </dialog><!-- fragment-end confirm_group -->

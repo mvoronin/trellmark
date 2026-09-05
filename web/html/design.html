@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trellmark — Design overview</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/design/frame.css">
+    <script src="/static/design/main.js" type="module"></script>
+  </head>
+  <body>
+    <header class="design-intro">
+      <h1>Design overview</h1>
+      <p>Synthetic examples of the real Trellmark components. Changes stay on this page and reset on reload.</p>
+    </header>
+    <div id="app-view" data-design-state="interactive">
+      <h2>Interactive bookmarks and toolbar</h2>
+<!-- include fragments/shell.html#toolbar -->
+      <main class="url-panel">
+<!-- include fragments/bookmark_forms.html#create_group -->
+        <div id="groups" class="groups"></div>
+      </main>
+    </div>
+    <div id="design-examples" class="design-examples"></div>
+    <section class="design-section" data-design-state="dialogs" aria-labelledby="design-dialogs-title">
+      <h2 id="design-dialogs-title">Dialogs and validation feedback</h2>
+      <p>Open each real dialog to inspect its fields, error text, focus trap and confirmation controls.</p>
+      <div id="design-dialog-actions" class="design-dialog-actions"></div>
+    </section>
+    <section class="design-section" data-design-state="authentication" aria-labelledby="design-authentication-title">
+      <h2 id="design-authentication-title">Login and session presentation</h2>
+      <p>A local form example. No credentials are submitted or stored.</p>
+<!-- include fragments/shell.html#authentication -->
+    </section>
+<!-- include fragments/dialogs.html#confirm_url -->
+<!-- include fragments/dialogs.html#edit_group -->
+<!-- include fragments/dialogs.html#edit_url -->
+<!-- include fragments/dialogs.html#confirm_group -->
+  </body>
+</html>

@@ -23,9 +23,10 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 
 - ✓ Backend feature cores are framework-free, with explicit transaction ports, focused adapters/routers, bounded workers, and executable dependency contracts in one deployable service — Phase 2
 
+- ✓ Framework-free frontend has explicit server/UI state, shared request/DOM primitives, authenticated shell, independent Bookmarks, native import enforcement, deterministic whole-tree builds, a measured ADR and local-only design mode — Phase 3 (epic #36, children #37–#45)
+
 ### Active
 
-- [ ] Separate the browser into a shared authenticated shell and independent Bookmarks feature, with enforced frontend boundaries and deterministic builds; backend boundaries are complete (GitHub Issue #3)
 - [ ] Add Notes as an independent domain with a dedicated `/notes/` page and a separate ordered group hierarchy up to three levels deep, including a protected default `Inbox` (GitHub Issue #1)
 - [ ] Let the user create, view, edit, move, and delete notes and note groups; each note has a title, raw Markdown body, created/updated timestamps, and optimistic version protection
 - [ ] Ensure stale note edits never overwrite newer content or discard the user's local draft
@@ -49,7 +50,8 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 - The Notes MVP is the repository's next milestone and follows the explicit dependency order: Issue #2, then Issue #3, then Issue #1.
 - The current backend is a FastAPI modular monolith using strict Pydantic contracts, SQLAlchemy Core, PostgreSQL 18, Alembic, and `ltree`-backed group hierarchies.
 - The current browser application is framework-free TypeScript with OpenAPI-generated declarations and committed JavaScript build artifacts.
-- The backend now separates Bookmarks, Identity, Backup, and platform responsibilities. Domain/application cores use immutable dataclasses and narrow ports; adapters own SQLAlchemy, Pydantic, HTTP, and external metadata. Fourteen zero-ignore Import Linter contracts enforce dependencies. Frontend feature boundaries remain the next prerequisite before Notes.
+- Phase 3 includes the complete frontend epic #36 and children #37–#45. It retains existing product behavior, shell HTML, and the unbundled TypeScript toolchain; the interactive design overview is served locally by `just design-mode` and excluded from every production runtime layer.
+- The backend now separates Bookmarks, Identity, Backup, and platform responsibilities. Domain/application cores use immutable dataclasses and narrow ports; adapters own SQLAlchemy, Pydantic, HTTP, and external metadata. Fourteen zero-ignore Import Linter contracts enforce dependencies. Frontend boundaries are now complete: `main.ts` composes shared/API/shell/Bookmarks owners, and a pinned native TypeScript graph checker enforces their imports. Notes domain/schema/API work is next.
 - Bookmark import now owns one PostgreSQL transaction, rejects overlapping logical bookmark writers immediately, rolls back every mutation stage, and exposes stable redacted errors with explicit manual retry.
 - Notes mirror the existing ordered, maximum-three-level hierarchy semantics but use an independent note-group forest; notes never reuse bookmark groups or masquerade as URLs.
 - The protected note `Inbox` is the default destination. Direct navigation to `/notes/` must work within the existing application and authentication boundary.
@@ -70,10 +72,11 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Complete Issue #2 before Issue #3, and Issue #3 before Issue #1 | Atomic backup/restore and domain boundaries are prerequisites for adding a second content domain safely | ✓ Issue #2 completed in Phase 1; backend portion of Issue #3 completed in Phase 2 |
+| Complete Issue #2 before Issue #3, and Issue #3 before Issue #1 | Atomic backup/restore and domain boundaries are prerequisites for adding a second content domain safely | ✓ Issue #2 completed in Phase 1; Issue #3 backend/frontend prerequisites completed in Phases 2–3 |
 | Serialize logical bookmark writes with a transaction-scoped advisory try-lock | The API requires immediate first-wins conflict handling before mutations; serializable isolation can abort later and does not replace this gate | ✓ Phase 1 |
 | Publish flat import failures with stable codes | Browser recovery needs safe, machine-readable `invalid_import`, `import_conflict`, and `import_failed` outcomes | ✓ Phase 1 |
 | Retain retryable import files until explicit user action | Recovery must preserve the current view without background resubmission or discarded input | ✓ Phase 1 |
+| Deliver the complete frontend epic #36 before Notes | Explicit state, reusable primitives, feature isolation, deterministic builds, and a real-view gallery prepare a repeatable feature pattern | ✓ Phase 3; all 14 plans and 10 requirements verified |
 | Give Notes an independent domain and note-group forest | Notes are first-class content and must not be represented as URLs or coupled to bookmark groups | — Pending |
 | Mirror existing ordered three-level hierarchy semantics for note groups | Reuses established user interaction and database invariants without sharing domain ownership | — Pending |
 | Use a protected `Inbox` as the default note group | Every note must belong to exactly one group and always has a safe initial destination | — Pending |
@@ -83,6 +86,10 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 | Read group visibility and memberships from one snapshot | Concurrent imports must not combine old visibility with new private content | ✓ Phase 2 |
 | Retain workload admission through worker cleanup | Native and scoped cancellation must not abandon database work or return capacity early | ✓ Phase 2 |
 | Preserve primary database failures through cleanup | A second cleanup failure must not change error classification or hide the original cause | ✓ Phase 2 |
+| Keep framework-free TypeScript and unbundled ES modules | A measured ADR records alternatives, Svelte reconsideration preference and observable triggers without adding runtime tooling | ✓ Phase 3 |
+| Compose shared HTML at build time and check every emitted path and byte | Reusable real views and deterministic artifacts prepare later features without runtime template fetching or filename allowlists | ✓ Phase 3 |
+| Keep design mode local and synthetic | Real components, rare states and dialogs can be inspected without backend/data access; dedicated assets never enter runtime layers | ✓ Phase 3 |
+| Retain private request ownership until logout succeeds | Failed logout must not discard in-progress results or strand controls; actual cleanup/expiry still invalidates before clearing private content | ✓ Phase 3 review repair |
 
 ## Evolution
 
@@ -102,4 +109,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-30 after Phase 1*
+*Last updated: 2026-09-05 after Phase 3*

@@ -363,6 +363,14 @@ body {
   color: var(--danger);
 }
 
+/* Red text on the dark login surface is below AA contrast. Match the existing
+   filled error treatment only when there is a message to display. */
+#login-status:not(:empty) {
+  padding: var(--gap-1) var(--gap-2);
+  background: var(--danger);
+  color: var(--accent-text);
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -760,7 +768,9 @@ body {
 }
 
 .group.dragging {
-  opacity: 0.45;
+  /* Fading the entire subtree makes both the band and URL text unreadable.
+     A dashed outline marks the held group without reducing text contrast. */
+  outline: var(--rule) dashed var(--border-strong);
 }
 
 /* The band is the group's title block, filled with the group's own hue. Ink

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Trellmark — Design overview</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/design/frame.css">
+    <script src="/static/design/main.js" type="module"></script>
+  </head>
+  <body>
+    <header class="design-intro">
+      <h1>Design overview</h1>
+      <p>Synthetic examples of the real Trellmark components. Changes stay on this page and reset on reload.</p>
+    </header>
+    <div id="app-view" data-design-state="interactive">
+      <h2>Interactive bookmarks and toolbar</h2>
+    <header class="app-header">
+      <form id="url-form" class="url-form" autocomplete="off">
+        <label class="sr-only" for="url-input">URL</label>
+        <div class="input-wrap">
+          <input
+            id="url-input"
+            name="url"
+            type="text"
+            inputmode="url"
+            placeholder="https://example.com"
+            required
+            autofocus
+          >
+          <button id="url-clear" class="input-clear" type="button" aria-label="Clear input" hidden>
+            <svg class="icon icon-x" aria-hidden="true"><use href="/static/icons.svg#x"></use></svg>
+          </button>
+        </div>
+        <button id="save-button" type="submit">Add</button>
+        <p id="form-status" role="status"></p>
+      </form>
+      <div class="header-side">
+        <div class="header-controls">
+          <p id="url-count">0 saved</p>
+          <div class="group-filter" role="group" aria-label="Group visibility">
+            <button type="button" data-group-filter="safe" aria-pressed="true">Safe</button>
+            <button type="button" data-group-filter="all" aria-pressed="false">All</button>
+          </div>
+          <div class="data-controls">
+            <button id="export-button" type="button">Export</button>
+            <label class="import-control" for="import-input">
+              Import
+              <input id="import-input" type="file" accept="application/json,.json">
+            </label>
+            <button id="import-retry-button" type="button" hidden disabled>Retry import</button>
+          </div>
+          <label class="sort-control">
+            Sort
+            <select id="sort-select">
+              <option value="added-desc">Newest first</option>
+              <option value="added-asc">Oldest first</option>
+              <option value="domain">Domain</option>
+            </select>
+          </label>
+          <label class="delete-toggle">
+            <input type="checkbox" id="delete-immediately">
+            Delete immediately
+          </label>
+          <button id="logout-button" type="button">Log out</button>
+        </div>
+        <div class="theme-toggle" role="group" aria-label="Color theme">
+          <button type="button" data-theme-value="system" aria-pressed="true">System</button>
+          <button type="button" data-theme-value="light" aria-pressed="false">Light</button>
+          <button type="button" data-theme-value="dark" aria-pressed="false">Dark</button>
+        </div>
+      </div>
+    </header>
+      <main class="url-panel">
+      <form id="group-form" class="group-form" autocomplete="off">
+        <label class="sr-only" for="group-input">New group</label>
+        <input id="group-input" name="name" type="text" placeholder="New group" required>
+        <label class="sr-only" for="group-domains">Domains</label>
+        <input
+          id="group-domains"
+          name="domains"
+          type="text"
+          placeholder="Domains (comma-separated)"
+        >
+        <label class="sr-only" for="group-parent">Parent group</label>
+        <select id="group-parent" name="parent_id" aria-label="Parent group">
+          <option value="">Root</option>
+        </select>
+        <label class="group-nsfw-toggle">
+          <input id="group-nsfw" name="nsfw" type="checkbox">
+          NSFW
+        </label>
+        <button id="group-button" type="submit">Add group</button>
+        <p id="group-status" role="status"></p>
+      </form>
+        <div id="groups" class="groups"></div>
+      </main>
+    </div>
+    <div id="design-examples" class="design-examples"></div>
+    <section class="design-section" data-design-state="dialogs" aria-labelledby="design-dialogs-title">
+      <h2 id="design-dialogs-title">Dialogs and validation feedback</h2>
+      <p>Open each real dialog to inspect its fields, error text, focus trap and confirmation controls.</p>
+      <div id="design-dialog-actions" class="design-dialog-actions"></div>
+    </section>
+    <section class="design-section" data-design-state="authentication" aria-labelledby="design-authentication-title">
+      <h2 id="design-authentication-title">Login and session presentation</h2>
+      <p>A local form example. No credentials are submitted or stored.</p>
+    <section id="session-pending" class="auth-shell" aria-live="polite">
+      <p>Checking session…</p>
+    </section>
+
+    <section id="login-view" class="auth-shell" hidden>
+      <form id="login-form" class="login-form">
+        <h1>Trellmark</h1>
+        <label for="login-input">Login</label>
+        <input
+          id="login-input"
+          name="login"
+          type="text"
+          autocomplete="username"
+          maxlength="128"
+          required
+          autofocus
+        >
+        <label for="password-input">Password</label>
+        <input
+          id="password-input"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        >
+        <button id="login-button" type="submit">Log in</button>
+        <p id="login-status" role="status" aria-live="polite"></p>
+      </form>
+      <div class="theme-toggle" role="group" aria-label="Color theme">
+        <button type="button" data-theme-value="system" aria-pressed="true">System</button>
+        <button type="button" data-theme-value="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-value="dark" aria-pressed="false">Dark</button>
+      </div>
+    </section>
+    </section>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <p class="confirm-title">Delete this URL?</p>
+      <p class="confirm-url" id="confirm-url"></p>
+      <form method="dialog" class="confirm-actions">
+        <button value="cancel" class="confirm-cancel">Cancel</button>
+        <button value="delete" class="confirm-delete" autofocus>Delete</button>
+      </form>
+    </dialog>
+    <dialog id="group-edit-dialog" class="confirm-dialog group-edit-dialog">
+      <form id="group-edit-form" class="edit-form" autocomplete="off">
+        <p class="confirm-title">Edit group</p>
+        <label>
+          Group name
+          <input id="group-edit-name" name="name" type="text" required>
+        </label>
+        <label class="group-nsfw-toggle">
+          <input id="group-edit-nsfw" name="nsfw" type="checkbox">
+          NSFW
+        </label>
+        <label>
+          Domains
+          <textarea
+            id="group-edit-domains"
+            name="domains"
+            rows="4"
+            placeholder="example.com&#10;another.example"
+          ></textarea>
+        </label>
+        <label>
+          Parent group
+          <select id="group-edit-parent" name="parent_id">
+            <option value="">Root</option>
+          </select>
+        </label>
+        <p id="group-edit-status" class="dialog-status" role="status"></p>
+        <div class="confirm-actions">
+          <button id="group-edit-cancel" type="button" class="confirm-cancel">Cancel</button>
+          <button id="group-edit-save" type="submit" class="confirm-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="url-edit-dialog" class="confirm-dialog">
+      <form id="url-edit-form" class="edit-form" autocomplete="off">
+        <p class="confirm-title">Edit URL</p>
+        <label>
+          Name / title
+          <input id="url-edit-title" name="title" type="text" placeholder="Use URL when empty">
+        </label>
+        <label>
+          Address
+          <input id="url-edit-url" name="url" type="text" inputmode="url" required>
+        </label>
+        <p id="url-edit-status" class="dialog-status" role="status"></p>
+        <div class="confirm-actions">
+          <button id="url-edit-cancel" type="button" class="confirm-cancel">Cancel</button>
+          <button id="url-edit-save" type="submit" class="confirm-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="group-delete-dialog" class="confirm-dialog">
+      <p class="confirm-title">Delete <span id="group-delete-name"></span>?</p>
+      <p class="confirm-url" id="group-delete-summary"></p>
+      <form method="dialog" class="confirm-actions group-delete-actions">
+        <button value="cancel" class="confirm-cancel">Cancel</button>
+        <button value="move_to_default" class="confirm-save" autofocus>Move links to default</button>
+        <button value="delete" class="confirm-delete">Delete links</button>
+      </form>
+    </dialog>
+  </body>
+</html>

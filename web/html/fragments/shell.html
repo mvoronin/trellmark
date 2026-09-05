@@ -1,0 +1,73 @@
+<!-- fragment-start authentication -->    <section id="session-pending" class="auth-shell" aria-live="polite">
+      <p>Checking session…</p>
+    </section>
+
+    <section id="login-view" class="auth-shell" hidden>
+      <form id="login-form" class="login-form">
+        <h1>Trellmark</h1>
+        <label for="login-input">Login</label>
+        <input
+          id="login-input"
+          name="login"
+          type="text"
+          autocomplete="username"
+          maxlength="128"
+          required
+          autofocus
+        >
+        <label for="password-input">Password</label>
+        <input
+          id="password-input"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        >
+        <button id="login-button" type="submit">Log in</button>
+        <p id="login-status" role="status" aria-live="polite"></p>
+      </form>
+      <div class="theme-toggle" role="group" aria-label="Color theme">
+        <button type="button" data-theme-value="system" aria-pressed="true">System</button>
+        <button type="button" data-theme-value="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-value="dark" aria-pressed="false">Dark</button>
+      </div>
+    </section><!-- fragment-end authentication -->
+
+<!-- fragment-start toolbar -->    <header class="app-header">
+<!-- include fragments/bookmark_forms.html#create_url -->
+      <div class="header-side">
+        <div class="header-controls">
+          <p id="url-count">0 saved</p>
+          <div class="group-filter" role="group" aria-label="Group visibility">
+            <button type="button" data-group-filter="safe" aria-pressed="true">Safe</button>
+            <button type="button" data-group-filter="all" aria-pressed="false">All</button>
+          </div>
+          <div class="data-controls">
+            <button id="export-button" type="button">Export</button>
+            <label class="import-control" for="import-input">
+              Import
+              <input id="import-input" type="file" accept="application/json,.json">
+            </label>
+            <button id="import-retry-button" type="button" hidden disabled>Retry import</button>
+          </div>
+          <label class="sort-control">
+            Sort
+            <select id="sort-select">
+              <option value="added-desc">Newest first</option>
+              <option value="added-asc">Oldest first</option>
+              <option value="domain">Domain</option>
+            </select>
+          </label>
+          <label class="delete-toggle">
+            <input type="checkbox" id="delete-immediately">
+            Delete immediately
+          </label>
+          <button id="logout-button" type="button">Log out</button>
+        </div>
+        <div class="theme-toggle" role="group" aria-label="Color theme">
+          <button type="button" data-theme-value="system" aria-pressed="true">System</button>
+          <button type="button" data-theme-value="light" aria-pressed="false">Light</button>
+          <button type="button" data-theme-value="dark" aria-pressed="false">Dark</button>
+        </div>
+      </div>
+    </header><!-- fragment-end toolbar -->

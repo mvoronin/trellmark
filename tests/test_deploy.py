@@ -44,8 +44,17 @@ def test_one_containerfile_installs_locked_dependencies_and_the_complete_app():
     assert 'ENV PATH="/app/.venv/bin:$PATH"' in containerfile
     assert "COPY server.py ./" in containerfile
     assert "COPY trellmark ./trellmark" in containerfile
-    assert "COPY web/index.html ./web/index.html" in containerfile
-    assert "COPY web/static ./web/static" in containerfile
+    staging, runtime = containerfile.split(
+        "FROM docker.io/library/python:3.14-slim AS runtime", 1
+    )
+    assert "AS frontend-assets" in staging
+    assert "COPY web/index.html ./web/index.html" in staging
+    assert "COPY web/static ./web/static" in staging
+    assert "RUN rm -rf ./web/static/design" in staging
+    assert "web/design.html" not in staging
+    assert "COPY --from=frontend-assets /assets/web ./web" in runtime
+    assert "COPY web" not in runtime
+    assert "rm -rf" not in runtime
     assert 'CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8000"]' in (
         containerfile
     )
@@ -546,3 +555,148 @@ def test_deploy_builds_committed_frontend_without_a_frontend_toolchain():
     )
     assert "npm " not in recipe
     assert "uv run" not in recipe
+
+
+def test_image_proof_requires_application_assets_and_rejects_design_files():
+    from scripts.check_frontend_image import check_runtime_files
+
+    files = {
+        "app/web/index.html",
+        "app/web/static/main.js",
+        "app/web/static/styles.css",
+        "app/web/static/icons.svg",
+        "app/web/static/api/client.js",
+        "app/web/static/shared/dom.js",
+        "app/web/static/shell/index.js",
+        "app/web/static/features/bookmarks/index.js",
+        "app/web/static/fonts/local.woff2",
+    }
+    check_runtime_files(files)
+    for missing in files:
+        with pytest.raises(RuntimeError, match="Missing production"):
+            check_runtime_files(files - {missing})
+    for forbidden in [
+        "app/web/design.html",
+        "app/web/static/design/main.js",
+        "app/web/static/design/frame.css",
+    ]:
+        with pytest.raises(RuntimeError, match="Design asset"):
+            check_runtime_files(files | {forbidden})
+
+
+@pytest.mark.parametrize("status", [200, 404])
+def test_image_http_proof_checks_design_content_even_with_spa_fallback(status):
+    from scripts.check_frontend_image import check_http_content
+
+    app_html = b'<form id="login-form"></form><script src="/static/main.js"></script>'
+    if status == 200:
+        check_http_content("/design.html", status, app_html, "text/html")
+    else:
+        check_http_content("/design.html", status, b"Not found", "text/html")
+    for marker in [b"Design overview", b"/static/design/main.js", b"data-design-state"]:
+        with pytest.raises(RuntimeError, match="Design content"):
+            check_http_content("/design.html", status, app_html + marker, "text/html")
+    with pytest.raises(RuntimeError, match="Application page"):
+        check_http_content("/design.html", 200, b"wrong page", "text/html")
+    with pytest.raises(RuntimeError, match="Dedicated design"):
+        check_http_content(
+            "/static/design/main.js", 200, b"export {};", "text/javascript"
+        )
+
+
+def test_image_proof_rejects_design_assets_in_earlier_runtime_layers(tmp_path):
+    import io
+    import json
+    import tarfile
+
+    from scripts.check_frontend_image import check_image_layers
+
+    archive = tmp_path / "image.tar"
+    with tarfile.open(archive, "w") as image:
+        manifest = json.dumps(
+            [{"Layers": ["first/layer.tar", "last/layer.tar"]}]
+        ).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(manifest)
+        image.addfile(info, io.BytesIO(manifest))
+        for layer_name, asset in [
+            ("first", "app/web/static/design/main.js"),
+            ("last", "app/web/static/.wh.design"),
+        ]:
+            layer = io.BytesIO()
+            with tarfile.open(fileobj=layer, mode="w") as contents:
+                contents.addfile(tarfile.TarInfo(asset))
+            info = tarfile.TarInfo(f"{layer_name}/layer.tar")
+            info.size = len(layer.getvalue())
+            image.addfile(info, io.BytesIO(layer.getvalue()))
+    with pytest.raises(RuntimeError, match="Design asset"):
+        check_image_layers(archive)
+
+
+def test_image_proof_cleanup_is_owned_bounded_and_continues_after_failure(
+    tmp_path, monkeypatch
+):
+    from scripts import check_frontend_image as proof
+
+    container_id = tmp_path / "container.id"
+    pod_id = tmp_path / "pod.id"
+    uncreated = tmp_path / "uncreated.id"
+    container_id.write_text("a" * 64)
+    pod_id.write_text("b" * 64)
+    calls = []
+
+    def remove(*arguments, **options):
+        calls.append((arguments, options))
+        return subprocess.CompletedProcess(arguments, int(arguments[-1] == "b" * 64))
+
+    monkeypatch.setattr(proof, "podman", remove)
+    with pytest.raises(RuntimeError, match="Could not remove every"):
+        proof.cleanup_resources(
+            [("container", container_id), ("pod", pod_id), ("pod", uncreated)]
+        )
+    assert calls == [
+        (("pod", "rm", "--force", "b" * 64), {"timeout": 30, "check": False}),
+        (("rm", "--force", "a" * 64), {"timeout": 30, "check": False}),
+    ]
+    calls.clear()
+    pod_id.write_text("trellmark")
+    with pytest.raises(RuntimeError, match="Could not remove every"):
+        proof.cleanup_resources([("pod", pod_id)])
+    assert calls == []
+
+
+def test_image_proof_diagnostics_do_not_echo_subprocess_secrets(monkeypatch):
+    from scripts import check_frontend_image as proof
+
+    def failed(arguments, **options):
+        assert options["timeout"] == 120
+        return subprocess.CompletedProcess(
+            arguments, 1, "synthetic secret", "synthetic secret"
+        )
+
+    monkeypatch.setattr(proof.subprocess, "run", failed)
+    with pytest.raises(RuntimeError, match=r"Podman run failed \(exit 1\)") as failure:
+        proof.podman("run", stdin="synthetic secret")
+    assert "synthetic secret" not in str(failure.value)
+
+
+def test_image_http_readiness_retries_reset_but_preserves_later_failures(monkeypatch):
+    from scripts import check_frontend_image as proof
+
+    paths = []
+    delays = []
+
+    def get(_opener, _origin, path):
+        paths.append(path)
+        if len(paths) == 1:
+            raise ConnectionResetError("Published port precedes application startup")
+        if path == "/internal/ready":
+            return 200, b"ready", "text/plain"
+        raise RuntimeError("Post-readiness failure remains visible")
+
+    monkeypatch.setattr(proof, "http_get", get)
+    monkeypatch.setattr(proof.time, "sleep", delays.append)
+    with pytest.raises(RuntimeError, match="Post-readiness failure remains visible"):
+        proof.check_http("http://127.0.0.1:8000", "synthetic", [])
+    assert paths == ["/internal/ready", "/internal/ready", "/"]
+    assert delays == [0.25]
