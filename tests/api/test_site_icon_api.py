@@ -1,13 +1,18 @@
-import asyncio
 import json
 from urllib import error, request
 
 import pytest
 
-import trellmark
-from tests.helpers import RecordingTitleFetcher, _authentication_headers, http_json
+from tests.bookmarks.helpers import seed_url, url_payload
+from tests.helpers import (
+    RecordingTitleFetcher,
+    _authentication_headers,
+    http_json,
+    run_async,
+)
 from trellmark.app import create_app
-from trellmark.site_icons import ICO_MEDIA_TYPE, PNG_MEDIA_TYPE, SiteIcon
+from trellmark.bookmarks.domain import EditURL, SiteIcon, URLUpdated
+from trellmark.bookmarks.integrations import ICO_MEDIA_TYPE, PNG_MEDIA_TYPE
 
 PNG = b"\x89PNG\r\n\x1a\napi-test"
 ICO = b"\x00\x00\x01\x00api-test"
@@ -41,16 +46,16 @@ class RecordingIconService:
 class ConcurrentEditTitleFetcher:
     def __init__(self) -> None:
         self.url_id = 0
+        self.service = None
 
     async def __call__(self, _url: str) -> str:
-        record = trellmark.read_url_record_by_id(self.url_id)
+        assert self.service is not None
+        record = await self.service.url_by_id(self.url_id)
         assert record is not None
-        updated, error_code = trellmark.update_url_record(
-            self.url_id,
-            expected_version=record["version"],
-            fields={"title": "Manual title"},
+        outcome = await self.service.edit_url(
+            EditURL(self.url_id, record.version, title="Manual title")
         )
-        assert updated is not None and error_code is None
+        assert isinstance(outcome, URLUpdated)
         return "Fetched title"
 
 
@@ -78,7 +83,7 @@ def test_icon_endpoint_returns_authenticated_canonical_raw_media(
     media_type,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com/path")
+    record = seed_url("https://example.com/path")
     assert record is not None
     icon_service.icon = SiteIcon(body, media_type)
 
@@ -115,7 +120,7 @@ def test_icon_endpoint_returns_json_404_for_missing_or_unavailable_icon(
     icon_service,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com")
+    record = seed_url("https://example.com")
     assert record is not None
 
     assert http_json(base_url, "/api/urls/999/icon") == (
@@ -143,7 +148,7 @@ def test_refresh_metadata_forces_title_and_icon_and_returns_current_data(
     icon_service,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
     icon_service.refreshed = True
 
@@ -182,7 +187,7 @@ def test_refresh_metadata_reports_independent_failure_flags(
     icon_service,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Existing title")
+    record = seed_url("https://example.com", title="Existing title")
     assert record is not None
     icon_service.refreshed = True
 
@@ -249,11 +254,13 @@ def test_refresh_metadata_keeps_optimistic_title_conflict_behavior(
     app,
     title_fetcher,
     icon_service,
+    bookmarks_service,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
     title_fetcher.url_id = record["id"]
+    title_fetcher.service = bookmarks_service
 
     status, payload = http_json(
         base_url,
@@ -265,7 +272,7 @@ def test_refresh_metadata_keeps_optimistic_title_conflict_behavior(
         409,
         {"error": "This URL was changed. Reload and try again."},
     )
-    assert trellmark.read_url_record_by_id(record["id"])["title"] == "Manual title"
+    assert url_payload(record["id"])["title"] == "Manual title"
     assert icon_service.refresh_calls == ["https://example.com"]
 
 
@@ -277,7 +284,7 @@ def test_icon_service_is_drained_by_application_lifespan():
         async with application.router.lifespan_context(application):
             pass
 
-    asyncio.run(enter_and_exit_lifespan())
+    run_async(enter_and_exit_lifespan)
 
     assert service.waited_for_idle is True
 
@@ -304,7 +311,7 @@ def test_openapi_describes_raw_icon_media_without_url_record_drift():
 
 def test_icon_contract_does_not_enter_url_records_or_exports(app):
     base_url, _ = app
-    trellmark.add_url("https://example.com")
+    seed_url("https://example.com")
 
     _, groups = http_json(base_url, "/api/groups")
     _, exported = http_json(base_url, "/api/export")

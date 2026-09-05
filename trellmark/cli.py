@@ -9,8 +9,8 @@ from alembic import command
 
 from .app import create_app
 from .config import public_origin
-from .identity import set_administrator_password, verify_seeded_identity
-from .storage import alembic_config, run_migrations, verify_db_at_head
+from .identity.persistence import set_administrator_password, verify_seeded_identity
+from .platform.runtime import alembic_config, run_migrations, verify_db_at_head
 
 type CommandHandler = Callable[[argparse.Namespace], None]
 FORWARDED_ALLOW_IPS = "127.0.0.1,::1"

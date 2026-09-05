@@ -6,8 +6,9 @@ from urllib import error, parse, request
 
 from sqlalchemy import inspect, text
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.postgres import TEST_LOGIN, TEST_PASSWORD
+from trellmark.platform import runtime
 
 # The Alembic revision this build expects. Defined once: a test that restores
 # `alembic_version` after tampering with it has to write the real head back, and
@@ -198,7 +199,7 @@ def group_positions_in(payload):
 
 def stored_groups():
     """The stored tree, shaped like an API payload so the helpers above fit."""
-    return {"groups": trellmark.read_group_records()}
+    return {"groups": bookmark_helpers.group_payloads()}
 
 
 def capture_storage_statements(monkeypatch):
@@ -209,10 +210,8 @@ def capture_storage_statements(monkeypatch):
     """
     from sqlalchemy import event
 
-    from trellmark import storage
-
     statements = []
-    engine = storage.get_engine()
+    engine = runtime.get_engine()
 
     def record_statement(
         _connection,
@@ -225,23 +224,20 @@ def capture_storage_statements(monkeypatch):
         statements.append(statement)
 
     event.listen(engine, "before_cursor_execute", record_statement)
-    monkeypatch.setattr(storage, "get_connection", engine.connect)
     return statements, engine
 
 
 def capture_connection_identities(monkeypatch):
-    """Record DBAPI connection identities acquired through content storage."""
-    from trellmark import storage
+    """Record DBAPI connection identities from the shared runtime pool."""
+    from sqlalchemy import event
 
-    engine = storage.get_engine()
+    engine = runtime.get_engine()
     identities = []
 
-    def recording_connection():
-        connection = engine.connect()
-        identities.append(id(connection.connection.dbapi_connection))
-        return connection
+    def recording_connection(dbapi_connection, _record, _proxy):
+        identities.append(id(dbapi_connection))
 
-    monkeypatch.setattr(storage, "get_connection", recording_connection)
+    event.listen(engine, "checkout", recording_connection)
     return identities, engine
 
 
@@ -304,7 +300,7 @@ def db_connection():
     engine, so they always target whatever database the `database` fixture
     pointed the app at.
     """
-    with trellmark.get_engine().connect() as connection:
+    with runtime.get_engine().connect() as connection:
         with connection.begin():
             yield connection
 
@@ -317,13 +313,13 @@ def db_query(sql, **params):
 
 def table_columns(table):
     """Return a table's column names, via SQLAlchemy inspection."""
-    inspector = inspect(trellmark.get_engine())
+    inspector = inspect(runtime.get_engine())
     return [column["name"] for column in inspector.get_columns(table)]
 
 
 def table_indexes(table):
     """Return {index name: [column names]} for a table."""
-    inspector = inspect(trellmark.get_engine())
+    inspector = inspect(runtime.get_engine())
     return {
         index["name"]: list(index["column_names"])
         for index in inspector.get_indexes(table)

@@ -1,15 +1,15 @@
 from playwright.sync_api import expect
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import grouped_url_ids_in
 
 
 def test_frontend_renders_groups_and_nested_urls(app, page):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    default_url = trellmark.add_url("https://one.example")
-    reading_url = trellmark.add_url("https://two.example")
-    trellmark.move_url_to_group(reading_url["id"], reading["id"])
+    reading = bookmark_helpers.seed_group("Reading")
+    default_url = bookmark_helpers.seed_url("https://one.example")
+    reading_url = bookmark_helpers.seed_url("https://two.example")
+    bookmark_helpers.seed_membership(reading_url["id"], reading["id"])
 
     page.goto(base_url)
 
@@ -48,7 +48,7 @@ def test_frontend_creates_group(app, page):
 
     expect(page.locator("#group-status")).to_have_text("Group added.")
     expect(page.get_by_role("heading", name="Reading")).to_be_visible()
-    assert [group["name"] for group in trellmark.read_group_records()] == [
+    assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
         "default",
         "Reading",
     ]
@@ -73,7 +73,7 @@ def test_frontend_creates_group_domains_and_auto_groups_new_url(app, page):
     expect(reading.get_by_role("link", name="example.com/article")).to_be_visible()
     expect(default.get_by_role("link")).to_have_count(0)
     expect(page.locator("#url-count")).to_have_text("1 saved")
-    assert trellmark.read_group_records()[1]["domains"] == [
+    assert bookmark_helpers.group_payloads()[1]["domains"] == [
         "example.com",
         "news.example",
     ]
@@ -91,7 +91,7 @@ def test_frontend_creates_nsfw_group_and_clears_checkbox(app, page):
     expect(page.locator("#group-status")).to_have_text("Group added.")
     expect(page.get_by_role("heading", name="Comics")).to_have_count(0)
     expect(group_form.get_by_label("NSFW")).not_to_be_checked()
-    assert trellmark.read_group_records()[1]["nsfw"] is True
+    assert bookmark_helpers.group_payloads()[1]["nsfw"] is True
 
     page.get_by_role("button", name="All", exact=True).click()
     expect(page.get_by_role("heading", name="Comics")).to_be_visible()
@@ -99,10 +99,10 @@ def test_frontend_creates_nsfw_group_and_clears_checkbox(app, page):
 
 def test_frontend_safe_filter_hides_nsfw_groups_and_urls_by_default(app, page):
     base_url, _ = app
-    private = trellmark.add_group("Private", nsfw=True)
-    safe_url = trellmark.add_url("https://safe.example")
-    private_url = trellmark.add_url("https://private.example")
-    trellmark.move_url_to_group(private_url["id"], private["id"])
+    private = bookmark_helpers.seed_group("Private", nsfw=True)
+    safe_url = bookmark_helpers.seed_url("https://safe.example")
+    private_url = bookmark_helpers.seed_url("https://private.example")
+    bookmark_helpers.seed_membership(private_url["id"], private["id"])
 
     page.goto(base_url)
 
@@ -124,7 +124,7 @@ def test_frontend_safe_filter_hides_nsfw_groups_and_urls_by_default(app, page):
 
 def test_frontend_edits_group_name_and_nsfw_flag(app, page):
     base_url, _ = app
-    trellmark.add_group("Reading", nsfw=True)
+    bookmark_helpers.seed_group("Reading", nsfw=True)
 
     page.goto(base_url)
     page.get_by_role("button", name="All", exact=True).click()
@@ -140,9 +140,9 @@ def test_frontend_edits_group_name_and_nsfw_flag(app, page):
     expect(page.get_by_role("heading", name="Later")).to_be_visible()
     page.get_by_role("button", name="Safe", exact=True).click()
     expect(page.get_by_role("heading", name="Later")).to_be_visible()
-    assert trellmark.read_group_records()[1]["name"] == "Later"
-    assert trellmark.read_group_records()[1]["nsfw"] is False
-    assert trellmark.read_group_records()[1]["domains"] == [
+    assert bookmark_helpers.group_payloads()[1]["name"] == "Later"
+    assert bookmark_helpers.group_payloads()[1]["nsfw"] is False
+    assert bookmark_helpers.group_payloads()[1]["domains"] == [
         "example.com",
         "news.example",
     ]
@@ -159,9 +159,9 @@ def test_frontend_default_group_has_no_edit_or_delete_controls(app, page):
 
 def test_frontend_deletes_group_and_moves_links_to_default(app, page):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    url = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(url["id"], reading["id"])
+    reading = bookmark_helpers.seed_group("Reading")
+    url = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(url["id"], reading["id"])
 
     page.goto(base_url)
     page.get_by_role("button", name="Delete group Reading").click()
@@ -178,15 +178,15 @@ def test_frontend_deletes_group_and_moves_links_to_default(app, page):
     )
     expect(default_group.get_by_role("link", name="one.example")).to_be_visible()
     assert grouped_url_ids_in(
-        {"groups": trellmark.read_group_records()}, "default"
+        {"groups": bookmark_helpers.group_payloads()}, "default"
     ) == [url["id"]]
 
 
 def test_frontend_deletes_group_and_included_links(app, page):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    url = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(url["id"], reading["id"])
+    reading = bookmark_helpers.seed_group("Reading")
+    url = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(url["id"], reading["id"])
 
     page.goto(base_url)
     page.get_by_role("button", name="Delete group Reading").click()
@@ -197,14 +197,14 @@ def test_frontend_deletes_group_and_included_links(app, page):
     expect(page.locator("#group-status")).to_have_text("Group and 1 link deleted.")
     expect(page.get_by_role("heading", name="Reading")).to_have_count(0)
     expect(page.get_by_role("link", name="one.example")).to_have_count(0)
-    assert trellmark.read_urls() == []
+    assert bookmark_helpers.saved_urls() == []
 
 
 def test_frontend_group_delete_does_not_claim_shared_url_was_deleted(app, page):
     base_url, _ = app
-    first = trellmark.add_group("First", domains=["example.com"])
-    second = trellmark.add_group("Second", domains=["example.com"])
-    saved = trellmark.add_url("https://example.com/x")
+    first = bookmark_helpers.seed_group("First", domains=["example.com"])
+    second = bookmark_helpers.seed_group("Second", domains=["example.com"])
+    saved = bookmark_helpers.seed_url("https://example.com/x")
 
     page.goto(base_url)
     page.get_by_role("button", name="Delete group First").click()
@@ -217,20 +217,20 @@ def test_frontend_group_delete_does_not_claim_shared_url_was_deleted(app, page):
         ".group", has=page.get_by_role("heading", name="Second")
     )
     expect(second_section.get_by_role("link", name="example.com/x")).to_be_visible()
-    assert trellmark.read_url_group_ids(saved["id"]) == [second["id"]]
-    assert first["id"] not in trellmark.read_url_group_ids(saved["id"])
+    assert bookmark_helpers.url_group_ids(saved["id"]) == [second["id"]]
+    assert first["id"] not in bookmark_helpers.url_group_ids(saved["id"])
 
 
 def test_frontend_group_delete_requires_explicit_choice(app, page):
     base_url, _ = app
-    trellmark.add_group("Reading")
+    bookmark_helpers.seed_group("Reading")
 
     page.goto(base_url)
     page.get_by_role("button", name="Delete group Reading").click()
     page.locator("#group-delete-dialog").get_by_role("button", name="Cancel").click()
 
     expect(page.get_by_role("heading", name="Reading")).to_be_visible()
-    assert [group["name"] for group in trellmark.read_group_records()] == [
+    assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
         "default",
         "Reading",
     ]
@@ -238,14 +238,14 @@ def test_frontend_group_delete_requires_explicit_choice(app, page):
 
 def test_frontend_shows_error_for_duplicate_group(app, page):
     base_url, _ = app
-    trellmark.add_group("Reading")
+    bookmark_helpers.seed_group("Reading")
 
     page.goto(base_url)
     page.get_by_label("New group").fill("Reading")
     page.get_by_role("button", name="Add group").click()
 
     expect(page.locator("#group-status")).to_have_text("This group already exists.")
-    assert [group["name"] for group in trellmark.read_group_records()] == [
+    assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
         "default",
         "Reading",
     ]
@@ -253,8 +253,8 @@ def test_frontend_shows_error_for_duplicate_group(app, page):
 
 def test_frontend_moves_url_to_group(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
-    trellmark.add_group("Reading")
+    bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_group("Reading")
 
     page.goto(base_url)
     page.get_by_label("Move one.example").select_option(label="Reading")
@@ -269,16 +269,16 @@ def test_frontend_moves_url_to_group(app, page):
     expect(reading_group.get_by_role("link")).to_have_text("one.example")
     expect(default_group.get_by_role("link")).to_have_count(0)
     assert grouped_url_ids_in(
-        {"groups": trellmark.read_group_records()}, "Reading"
-    ) == [trellmark.read_url_records()[0]["id"]]
+        {"groups": bookmark_helpers.group_payloads()}, "Reading"
+    ) == [bookmark_helpers.url_payloads()[0]["id"]]
 
 
 def test_frontend_move_and_delete_change_only_the_current_group(app, page):
     base_url, _ = app
-    source = trellmark.add_group("Source", domains=["example.com"])
-    existing = trellmark.add_group("Existing", domains=["example.com"])
-    target = trellmark.add_group("Target")
-    saved = trellmark.add_url("https://example.com/article")
+    source = bookmark_helpers.seed_group("Source", domains=["example.com"])
+    existing = bookmark_helpers.seed_group("Existing", domains=["example.com"])
+    target = bookmark_helpers.seed_group("Target")
+    saved = bookmark_helpers.seed_url("https://example.com/article")
 
     page.goto(base_url)
     source_section = page.locator(
@@ -301,7 +301,7 @@ def test_frontend_move_and_delete_change_only_the_current_group(app, page):
     expect(
         target_section.get_by_role("link", name="example.com/article")
     ).to_be_visible()
-    assert trellmark.read_url_group_ids(saved["id"]) == [existing["id"], target["id"]]
+    assert bookmark_helpers.url_group_ids(saved["id"]) == [existing["id"], target["id"]]
 
     page.get_by_label("Delete immediately").check()
     existing_section.get_by_role("button", name="Delete example.com/article").click()
@@ -310,5 +310,5 @@ def test_frontend_move_and_delete_change_only_the_current_group(app, page):
     expect(
         target_section.get_by_role("link", name="example.com/article")
     ).to_be_visible()
-    assert trellmark.read_url_group_ids(saved["id"]) == [target["id"]]
-    assert source["id"] not in trellmark.read_url_group_ids(saved["id"])
+    assert bookmark_helpers.url_group_ids(saved["id"]) == [target["id"]]
+    assert source["id"] not in bookmark_helpers.url_group_ids(saved["id"])

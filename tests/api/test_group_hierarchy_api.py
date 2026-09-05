@@ -5,11 +5,12 @@ is only about what having a parent changes.
 """
 
 import threading
+from dataclasses import asdict
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import (
     all_groups_in,
     capture_storage_statements,
@@ -18,10 +19,12 @@ from tests.helpers import (
     group_names_in,
     grouped_url_ids_in,
     http_json,
+    run_async,
     stored_groups,
 )
-from trellmark import storage
-from trellmark.models import GroupsResponse
+from trellmark.bookmarks import domain, persistence
+from trellmark.bookmarks.api import GroupsResponse
+from trellmark.platform.runtime import get_engine
 
 
 def _create_group(base_url, name, parent_id=None, **fields):
@@ -82,10 +85,13 @@ def test_reading_the_tree_takes_a_bounded_number_of_queries(app, monkeypatch):
     base_url, _ = app
     _seed_tree(base_url)
     for index in range(6):
-        trellmark.add_url(f"https://{index}.example")
+        bookmark_helpers.seed_url(f"https://{index}.example")
     statements, engine = capture_storage_statements(monkeypatch)
 
-    groups = trellmark.read_group_records()
+    groups = [
+        asdict(group)
+        for group in persistence.PostgresGroupQueries(get_engine).list_groups()
+    ]
     engine.dispose()
 
     # Three reads — groups, memberships, domains — however deep the tree is.
@@ -497,8 +503,8 @@ def test_patch_group_order_rejects_an_incomplete_child_list(app):
 def test_delete_group_with_children_is_refused(app):
     base_url, _ = app
     root_id, _, _, _ = _seed_tree(base_url)
-    url = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(url["id"], root_id)
+    url = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(url["id"], root_id)
 
     status, payload = http_json(
         base_url,
@@ -511,7 +517,7 @@ def test_delete_group_with_children_is_refused(app):
     assert payload == {"error": "Move or delete this group's child groups first."}
     assert len(all_groups_in(stored_groups())) == 5
     assert grouped_url_ids_in(stored_groups(), "Root") == [url["id"]]
-    assert trellmark.read_urls() == ["https://one.example"]
+    assert bookmark_helpers.saved_urls() == ["https://one.example"]
 
 
 def test_delete_group_compacts_only_its_own_siblings(app):
@@ -544,8 +550,8 @@ def test_delete_group_compacts_only_its_own_siblings(app):
 def test_delete_deepest_group_moves_its_urls_to_default(app):
     base_url, _ = app
     _, _, grandchild_id, _ = _seed_tree(base_url)
-    url = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(url["id"], grandchild_id)
+    url = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(url["id"], grandchild_id)
 
     status, payload = http_json(
         base_url,
@@ -563,7 +569,7 @@ def test_delete_deepest_group_moves_its_urls_to_default(app):
 def test_urls_can_be_moved_into_and_out_of_a_nested_group(app):
     base_url, _ = app
     _, _, grandchild_id, _ = _seed_tree(base_url)
-    url = trellmark.add_url("https://one.example")
+    url = bookmark_helpers.seed_url("https://one.example")
 
     status, payload = http_json(
         base_url,
@@ -586,7 +592,7 @@ def test_urls_can_be_moved_into_and_out_of_a_nested_group(app):
     )
 
     assert status == 200
-    assert trellmark.read_urls() == []
+    assert bookmark_helpers.saved_urls() == []
 
 
 def test_domain_rules_match_groups_at_every_depth(app):
@@ -629,10 +635,53 @@ def _hold_sibling_lock(connection, parent_id):
     connection.execute(
         text("SELECT pg_advisory_xact_lock(:namespace, :key)"),
         {
-            "namespace": storage.SIBLING_LOCK_NAMESPACE,
-            "key": storage.ROOT_SIBLING_LOCK_KEY if parent_id is None else parent_id,
+            "namespace": persistence.SIBLING_LOCK_NAMESPACE,
+            "key": persistence.ROOT_SIBLING_LOCK_KEY
+            if parent_id is None
+            else parent_id,
         },
     )
+
+
+def test_group_sibling_locks_take_unique_keys_in_sorted_order(database):
+    engine = get_engine()
+    attempted = []
+
+    def capture(_connection, _cursor, statement, parameters, _context, _many):
+        if "pg_advisory_xact_lock" in statement:
+            namespace, key = parameters.values()
+            assert namespace == persistence.SIBLING_LOCK_NAMESPACE
+            attempted.append(key)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as connection:
+            with connection.begin():
+                persistence._lock_sibling_sets(connection, 3, None, 2, 3)
+                locks = (
+                    connection.execute(
+                        text(
+                            "SELECT objid FROM pg_locks WHERE pid = pg_backend_pid() "
+                            "AND locktype = 'advisory' AND classid = 7501 AND granted "
+                            "ORDER BY objid"
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert locks == [0, 2, 3]
+        assert attempted == [0, 2, 3]
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    with engine.connect() as connection:
+        for key in (0, 2, 3):
+            assert (
+                connection.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(7501, :key)"), {"key": key}
+                )
+                is True
+            )
 
 
 def _run_in_thread(work):
@@ -656,7 +705,7 @@ def _assert_waits_for_lock(locked_parent_id, work, message):
     the lock from a second connection stands in for the concurrent writer
     without needing a real race to be deterministic.
     """
-    with trellmark.get_engine().connect() as blocker:
+    with get_engine().connect() as blocker:
         with blocker.begin():
             _hold_sibling_lock(blocker, locked_parent_id)
             thread, outcome = _run_in_thread(work)
@@ -671,7 +720,7 @@ def _assert_waits_for_lock(locked_parent_id, work, message):
 
 
 @pytest.mark.parametrize("parent", ["root", "child"])
-def test_appending_to_a_sibling_set_waits_for_its_lock(app, parent):
+def test_appending_to_a_sibling_set_waits_for_its_lock(app, parent, bookmarks_service):
     """Two appends to one sibling set must not both read the same position.
 
     Appending reads the sibling count and writes it as the new position, so
@@ -687,18 +736,23 @@ def test_appending_to_a_sibling_set_waits_for_its_lock(app, parent):
         else stored_groups()["groups"]
     )
 
-    record, error = _assert_waits_for_lock(
+    outcome = _assert_waits_for_lock(
         parent_id,
-        lambda: trellmark.create_group_record("Appended", parent_id=parent_id),
+        lambda: run_async(
+            lambda: bookmarks_service.create_group(
+                domain.CreateGroup("Appended", parent_id=parent_id)
+            )
+        ),
         "the append did not wait for the lock",
     )
 
-    assert error is None
+    assert isinstance(outcome, domain.GroupCreated)
+    record = asdict(outcome.record)
     assert record["parent_id"] == parent_id
     assert record["position"] == existing
 
 
-def test_deleting_a_group_waits_for_its_sibling_set(app):
+def test_deleting_a_group_waits_for_its_sibling_set(app, bookmarks_service):
     """Deleting compacts the survivors, so it renumbers the set like an append.
 
     Left unlocked, a delete that renumbers while an append picks a position
@@ -709,19 +763,24 @@ def test_deleting_a_group_waits_for_its_sibling_set(app):
     _, first = _create_group(base_url, "First")
     _create_group(base_url, "Second")
 
-    result, error = _assert_waits_for_lock(
+    outcome = _assert_waits_for_lock(
         None,
-        lambda: trellmark.delete_group(first["group"]["id"], "delete"),
+        lambda: run_async(
+            lambda: bookmarks_service.delete_group(
+                domain.DeleteGroup(first["group"]["id"], "delete")
+            )
+        ),
         "the delete did not wait for the lock",
     )
 
-    assert error is None
+    assert isinstance(outcome, domain.GroupDeleted)
+    result = asdict(outcome)
     assert result["group_id"] == first["group"]["id"]
     assert group_names_in(stored_groups()) == ["default", "Second"]
     assert [group["position"] for group in stored_groups()["groups"]] == [0, 1]
 
 
-def test_moving_a_group_out_waits_for_the_set_it_leaves(app):
+def test_moving_a_group_out_waits_for_the_set_it_leaves(app, bookmarks_service):
     """A move renumbers two sets, and the one it leaves is the easy one to miss.
 
     The destination here is a different set entirely, so locking only the
@@ -734,35 +793,44 @@ def test_moving_a_group_out_waits_for_the_set_it_leaves(app):
     _, first = _create_group(base_url, "First", source["group"]["id"])
     _create_group(base_url, "Second", source["group"]["id"])
 
-    record, error = _assert_waits_for_lock(
+    outcome = _assert_waits_for_lock(
         source["group"]["id"],
-        lambda: trellmark.update_group(
-            first["group"]["id"], parent_id=target["group"]["id"]
+        lambda: run_async(
+            lambda: bookmarks_service.update_group(
+                domain.UpdateGroup(
+                    first["group"]["id"], parent_id=target["group"]["id"]
+                )
+            )
         ),
         "the move did not wait for the lock on the set it left",
     )
 
-    assert error is None
+    assert isinstance(outcome, domain.GroupUpdated)
+    record = asdict(outcome.record)
     assert record["parent_id"] == target["group"]["id"]
     assert child_names_in(stored_groups(), "Source") == ["Second"]
     assert group_in(stored_groups(), "Second")["position"] == 0
     assert child_names_in(stored_groups(), "Target") == ["First"]
 
 
-def test_reordering_waits_for_the_sibling_set(app):
+def test_reordering_waits_for_the_sibling_set(app, bookmarks_service):
     base_url, _ = app
     _, first = _create_group(base_url, "First")
     _, second = _create_group(base_url, "Second")
 
-    reordered = _assert_waits_for_lock(
+    outcome = _assert_waits_for_lock(
         None,
-        lambda: trellmark.update_group_order(
-            None, [second["group"]["id"], first["group"]["id"], 1]
+        lambda: run_async(
+            lambda: bookmarks_service.reorder_groups(
+                domain.ReorderGroups(
+                    None, (second["group"]["id"], first["group"]["id"], 1)
+                )
+            )
         ),
         "the reorder did not wait for the lock",
     )
 
-    assert reordered is True
+    assert isinstance(outcome, domain.GroupsReordered)
     assert group_names_in(stored_groups()) == ["Second", "First", "default"]
 
 
@@ -777,7 +845,7 @@ def test_a_trigger_rejection_surfaces_as_a_clean_api_error(app, monkeypatch):
     base_url, _ = app
     _, _, grandchild_id, _ = _seed_tree(base_url)
     _, leaf = _create_group(base_url, "Leaf")
-    monkeypatch.setattr(storage, "_validate_parent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(persistence, "_validate_parent", lambda *_args, **_kwargs: None)
 
     status, payload = http_json(
         base_url,
@@ -791,14 +859,19 @@ def test_a_trigger_rejection_surfaces_as_a_clean_api_error(app, monkeypatch):
     assert child_names_in(stored_groups(), "Grandchild") == []
 
 
-def test_storage_rejects_a_fourth_level_even_when_called_directly(app):
+def test_storage_rejects_a_fourth_level_even_when_called_directly(
+    app, bookmarks_service
+):
     _, _ = app
-    root = trellmark.add_group("Root")
-    child = trellmark.add_group("Child", parent_id=root["id"])
-    grandchild = trellmark.add_group("Grandchild", parent_id=child["id"])
+    root = bookmark_helpers.seed_group("Root")
+    child = bookmark_helpers.seed_group("Child", parent_id=root["id"])
+    grandchild = bookmark_helpers.seed_group("Grandchild", parent_id=child["id"])
 
-    record, error = trellmark.create_group_record("TooDeep", parent_id=grandchild["id"])
+    outcome = run_async(
+        lambda: bookmarks_service.create_group(
+            domain.CreateGroup("TooDeep", parent_id=grandchild["id"])
+        )
+    )
 
-    assert record is None
-    assert error == "depth_exceeded"
-    assert trellmark.read_group_record_by_name("TooDeep") is None
+    assert outcome == domain.GroupDepthExceeded()
+    assert bookmark_helpers.group_by_name("TooDeep") is None

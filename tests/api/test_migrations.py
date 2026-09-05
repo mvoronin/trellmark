@@ -5,7 +5,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import (
     CURRENT_HEAD,
     db_connection,
@@ -13,10 +13,28 @@ from tests.helpers import (
     table_columns,
     table_indexes,
 )
+from trellmark import cli
+from trellmark.platform import runtime
+
+
+def test_platform_runtime_owns_migration_and_revision_startup_operations(
+    empty_database,
+):
+    for name in ("alembic_config", "run_migrations", "verify_db_at_head"):
+        operation = getattr(runtime, name, None)
+        assert callable(operation), f"Platform runtime must provide {name}."
+        assert operation.__module__ == "trellmark.platform.runtime"
+        assert getattr(cli, name) is operation
+
+    assert int(db_query("SHOW server_version_num")[0][0]) // 10000 == 18
+    cli.main(["migrate"])
+    assert runtime.verify_db_at_head() is None
+    assert db_query("SELECT version_num FROM alembic_version") == [(CURRENT_HEAD,)]
+    assert runtime.alembic_config().get_main_option("sqlalchemy.url") is None
 
 
 def test_run_migrations_creates_schema_and_exactly_one_default_group(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert db_query('SELECT name, position, nsfw FROM "groups"') == [
         ("default", 0, False)
@@ -32,7 +50,7 @@ def test_run_migrations_creates_schema_and_exactly_one_default_group(empty_datab
 
 
 def test_baseline_seeds_a_disabled_admin_credential(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert db_query(
         "SELECT u.username, u.role, u.status, p.password_hash "
@@ -41,7 +59,7 @@ def test_baseline_seeds_a_disabled_admin_credential(empty_database):
 
 
 def test_authentication_schema_has_bounded_lookup_and_expiry_indexes(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert {
         "users",
@@ -72,7 +90,7 @@ def test_authentication_schema_has_bounded_lookup_and_expiry_indexes(empty_datab
 
 
 def test_baseline_creates_origin_keyed_site_icon_cache(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert table_columns("site_icon_cache") == [
         "origin",
@@ -114,7 +132,7 @@ def test_site_icon_cache_rejects_partial_or_oversized_positive_rows(app):
 
 
 def test_migrated_columns_use_native_postgresql_types(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert _column_types("urls") == {
         "id": ("integer", "NO"),
@@ -165,7 +183,7 @@ def _column_defaults(table):
 
 
 def test_ids_are_generated_by_identity_columns(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert db_query(
         "SELECT is_identity FROM information_schema.columns "
@@ -178,18 +196,18 @@ def test_ids_are_generated_by_identity_columns(empty_database):
 
 
 def test_run_migrations_can_run_more_than_once(empty_database):
-    trellmark.run_migrations()
-    trellmark.add_url("https://one.example")
-    trellmark.run_migrations()
+    runtime.run_migrations()
+    bookmark_helpers.seed_url("https://one.example")
+    runtime.run_migrations()
 
     assert db_query('SELECT COUNT(*) FROM "groups"') == [(1,)]
     assert db_query("SELECT COUNT(*) FROM alembic_version") == [(1,)]
-    assert trellmark.read_urls() == ["https://one.example"]
+    assert bookmark_helpers.saved_urls() == ["https://one.example"]
 
 
 def test_deleting_a_group_cascades_to_memberships_and_domains(app):
-    group = trellmark.add_group("Reading", domains=["example.com"])
-    saved = trellmark.add_url("https://example.com/x")
+    group = bookmark_helpers.seed_group("Reading", domains=["example.com"])
+    saved = bookmark_helpers.seed_url("https://example.com/x")
 
     with db_connection() as connection:
         connection.execute(
@@ -203,11 +221,11 @@ def test_deleting_a_group_cascades_to_memberships_and_domains(app):
         "SELECT COUNT(*) FROM group_domains WHERE group_id = :id", id=group["id"]
     ) == [(0,)]
     # The URL itself survives; only its membership in that group went away.
-    assert trellmark.read_url_record_by_id(saved["id"]) == saved
+    assert bookmark_helpers.url_payload(saved["id"]) == saved
 
 
 def test_deleting_a_url_cascades_to_its_memberships(app):
-    saved = trellmark.add_url("https://one.example")
+    saved = bookmark_helpers.seed_url("https://one.example")
 
     with db_connection() as connection:
         connection.execute(text("DELETE FROM urls WHERE id = :id"), {"id": saved["id"]})
@@ -218,7 +236,7 @@ def test_deleting_a_url_cascades_to_its_memberships(app):
 
 
 def test_url_uniqueness_is_enforced_by_the_database(app):
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     with pytest.raises(IntegrityError):
         with db_connection() as connection:
@@ -228,7 +246,7 @@ def test_url_uniqueness_is_enforced_by_the_database(app):
 
 
 def test_group_name_uniqueness_is_case_insensitive_in_the_database(app):
-    trellmark.add_group("Reading")
+    bookmark_helpers.seed_group("Reading")
 
     with pytest.raises(IntegrityError):
         with db_connection() as connection:
@@ -246,13 +264,13 @@ def test_group_position_uniqueness_is_enforced_by_the_database(app):
 
 
 def test_migrations_have_exactly_one_head():
-    heads = ScriptDirectory.from_config(trellmark.alembic_config()).get_heads()
+    heads = ScriptDirectory.from_config(runtime.alembic_config()).get_heads()
 
     assert list(heads) == [CURRENT_HEAD]
 
 
 def test_baseline_installs_the_ltree_extension(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert db_query("SELECT extname FROM pg_extension WHERE extname = 'ltree'") == [
         ("ltree",)
@@ -264,7 +282,7 @@ def test_baseline_installs_the_ltree_extension(empty_database):
 
 
 def test_group_path_has_a_gist_index_with_the_ltree_operator_class(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     # The operator class is the point: a GiST index over some other class, or a
     # plain text column, would not make `<@` and `@>` index-usable.
@@ -280,7 +298,7 @@ def test_group_path_has_a_gist_index_with_the_ltree_operator_class(empty_databas
 
 
 def test_group_hierarchy_constraints_and_indexes_exist(empty_database):
-    trellmark.run_migrations()
+    runtime.run_migrations()
 
     assert db_query(
         "SELECT conname FROM pg_constraint "
@@ -516,11 +534,11 @@ def test_deleting_a_group_with_children_is_restricted(app):
 
 
 def test_generated_ids_are_not_reused_after_deletion(app):
-    first = trellmark.add_url("https://one.example")
-    second = trellmark.add_url("https://two.example")
+    first = bookmark_helpers.seed_url("https://one.example")
+    second = bookmark_helpers.seed_url("https://two.example")
 
-    assert trellmark.remove_url_by_id(second["id"], 1)
-    third = trellmark.add_url("https://three.example")
+    assert bookmark_helpers.remove_membership(second["id"], 1)
+    third = bookmark_helpers.seed_url("https://three.example")
 
     assert first["id"] == 1
     assert second["id"] == 2

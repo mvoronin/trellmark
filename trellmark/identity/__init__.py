@@ -1,23 +1,19 @@
-"""Single-user Identity boundary for passwords and browser sessions."""
+"""Framework-free Identity application and command surface."""
 
-from .repository import (
+from .application import IdentityApplicationService
+from .domain import (
     AuthSession,
-    LoginBlocked,
-    LoginRejected,
-    authenticate_session,
-    create_login_session,
-    revoke_session,
-    set_administrator_password,
-    verify_seeded_identity,
+    LoginCommand,
+    RevokeSessionCommand,
+    RotatePasswordCommand,
+    SessionCommand,
 )
 
 __all__ = [
     "AuthSession",
-    "LoginBlocked",
-    "LoginRejected",
-    "authenticate_session",
-    "create_login_session",
-    "revoke_session",
-    "set_administrator_password",
-    "verify_seeded_identity",
+    "IdentityApplicationService",
+    "LoginCommand",
+    "RevokeSessionCommand",
+    "RotatePasswordCommand",
+    "SessionCommand",
 ]

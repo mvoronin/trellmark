@@ -1,11 +1,12 @@
+from typing import assert_never
+
 from fastapi import Request
 from sqlalchemy.exc import SQLAlchemyError
-from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import config
-from ..responses import error_response
+from ..platform.responses import error_response
 from .api import (
     AUTHENTICATION_REQUIRED,
     CSRF_REJECTED,
@@ -14,7 +15,13 @@ from .api import (
     cross_site_fetch,
     trusted_origin,
 )
-from .repository import authenticate_session, csrf_matches
+from .application import IdentityApplicationService
+from .domain import (
+    SessionAuthenticated,
+    SessionCommand,
+    SessionMissing,
+    csrf_matches,
+)
 from .routes import LOGIN_OPERATION, PUBLIC_OPERATIONS
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -23,8 +30,9 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 class AuthenticationBoundaryMiddleware:
     """Default-deny all API paths before FastAPI parses route inputs."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, service: IdentityApplicationService) -> None:
         self.app = app
+        self.service = service
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -49,16 +57,23 @@ class AuthenticationBoundaryMiddleware:
 
         cookie_value = request.cookies.get(config.session_cookie_name())
         try:
-            session = await run_in_threadpool(authenticate_session, cookie_value)
+            outcome = await self.service.authenticate_session(
+                SessionCommand(cookie_value)
+            )
         except SQLAlchemyError:
             await self._error(scope, receive, send, "Service unavailable.", 503)
             return
-        if session is None:
-            response = error_response(AUTHENTICATION_REQUIRED, 401)
-            if cookie_value is not None:
-                clear_session_cookie(response)
-            await response(scope, receive, send)
-            return
+        match outcome:
+            case SessionMissing():
+                response = error_response(AUTHENTICATION_REQUIRED, 401)
+                if cookie_value is not None:
+                    clear_session_cookie(response)
+                await response(scope, receive, send)
+                return
+            case SessionAuthenticated(session):
+                pass
+            case _:
+                assert_never(outcome)
 
         if method not in SAFE_METHODS:
             if not trusted_origin(request) or cross_site_fetch(request):

@@ -1,5 +1,4 @@
-from trellmark import *  # noqa: F403
-from trellmark import main
+from trellmark.cli import main
 
 if __name__ == "__main__":
     main()

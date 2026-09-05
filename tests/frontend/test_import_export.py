@@ -3,9 +3,14 @@ from datetime import datetime
 
 import pytest
 from playwright.sync_api import expect
+from sqlalchemy.exc import SQLAlchemyError
 
-import trellmark
-from tests.helpers import grouped_url_ids_in
+from tests.bookmarks import helpers as bookmark_helpers
+from tests.helpers import (
+    grouped_url_ids_in,
+    logical_bookmark_snapshot,
+    public_bookmark_snapshot,
+)
 
 
 def _write_import_file(tmp_path, filename, *, group_name="Reading"):
@@ -36,9 +41,9 @@ def _write_import_file(tmp_path, filename, *, group_name="Reading"):
 
 def test_frontend_exports_json_file(app, page):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    saved = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(saved["id"], reading["id"])
+    reading = bookmark_helpers.seed_group("Reading")
+    saved = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(saved["id"], reading["id"])
 
     page.goto(base_url)
 
@@ -102,8 +107,8 @@ def test_frontend_imports_json_file(app, page, tmp_path):
         "href", "https://example.com"
     )
     assert grouped_url_ids_in(
-        {"groups": trellmark.read_group_records()}, "Reading"
-    ) == [trellmark.read_url_records()[0]["id"]]
+        {"groups": bookmark_helpers.group_payloads()}, "Reading"
+    ) == [bookmark_helpers.url_payloads()[0]["id"]]
     expect(page.locator("#import-input")).to_have_value("")
     expect(retry).to_be_hidden()
     expect(retry).to_be_disabled()
@@ -129,7 +134,7 @@ def test_frontend_retains_import_state_for_one_manual_retry(
     app, page, tmp_path, status, code, message
 ):
     base_url, _ = app
-    trellmark.add_group("Existing")
+    bookmark_helpers.seed_group("Existing")
     import_file = _write_import_file(tmp_path, f"retry-{code}.json")
     import_requests = []
     groups_requests = []
@@ -188,7 +193,7 @@ def test_frontend_retains_import_state_for_one_manual_retry(
 
 def test_frontend_invalid_import_requires_a_corrected_file(app, page, tmp_path):
     base_url, _ = app
-    trellmark.add_group("Existing")
+    bookmark_helpers.seed_group("Existing")
     invalid_file = tmp_path / "invalid-import.json"
     invalid_file.write_text("{", encoding="utf-8")
     corrected_file = _write_import_file(tmp_path, "corrected-import.json")
@@ -232,11 +237,106 @@ def test_frontend_invalid_import_requires_a_corrected_file(app, page, tmp_path):
     expect(retry).to_be_disabled()
 
 
+def test_frontend_retries_the_retained_file_after_real_import_rollback(
+    app, page, tmp_path, backup_uow_factory
+):
+    base_url, _ = app
+    bookmark_helpers.seed_group("Existing")
+    import_file = _write_import_file(tmp_path, "rollback-retry.json")
+    direct_before = logical_bookmark_snapshot()
+    public_before = public_bookmark_snapshot(base_url)
+    requests = []
+    stages = []
+
+    def fail_after_url_metadata(stage):
+        stages.append(stage)
+        if stage == "url_metadata":
+            raise SQLAlchemyError("Synthetic late restore failure")
+
+    backup_uow_factory.observer = fail_after_url_metadata
+    page.goto(base_url)
+    expect(page.get_by_role("heading", name="Existing")).to_be_visible()
+    page.on(
+        "request",
+        lambda request: (
+            requests.append(request.post_data)
+            if request.url.endswith("/api/import")
+            else None
+        ),
+    )
+    import_input = page.locator("#import-input")
+    retry = page.locator("#import-retry-button")
+    with page.expect_response("**/api/import") as failed_response:
+        import_input.set_input_files(str(import_file))
+
+    assert failed_response.value.status == 500
+    assert failed_response.value.headers["cache-control"] == "no-store"
+    assert failed_response.value.json() == {
+        "error": "Import failed. No import changes were saved. Try again.",
+        "code": "import_failed",
+    }
+    expect(page.locator("#form-status")).to_have_text(
+        "Import failed. No import changes were saved. Try again."
+    )
+    assert stages[-1] == "url_metadata"
+    assert logical_bookmark_snapshot() == direct_before
+    assert public_bookmark_snapshot(base_url) == public_before
+    expect(page.get_by_role("heading", name="Existing")).to_be_visible()
+    expect(page.get_by_role("heading", name="Reading")).to_have_count(0)
+    assert import_input.evaluate("input => input.files[0].name") == import_file.name
+    expect(retry).to_be_enabled()
+    assert len(requests) == 1
+
+    backup_uow_factory.observer = None
+    with page.expect_response("**/api/import") as successful_response:
+        retry.click()
+
+    assert successful_response.value.status == 200
+    assert successful_response.value.headers["cache-control"] == "no-store"
+    expect(page.locator("#form-status")).to_have_text("Imported 1, skipped 0.")
+    expect(page.get_by_role("heading", name="Reading")).to_be_visible()
+    assert len(requests) == 2 and requests[0] == requests[1]
+    expect(import_input).to_have_value("")
+    expect(retry).to_be_hidden()
+    expect(retry).to_be_disabled()
+
+
 def test_logout_clears_retained_import_state(app, page, tmp_path):
     base_url, _ = app
-    trellmark.add_group("Existing")
+    bookmark_helpers.seed_group("Existing")
     import_file = _write_import_file(tmp_path, "logout-import.json")
 
+    page.add_init_script(
+        """
+        (() => {
+          const nativeFetch = window.fetch.bind(window);
+          let releaseSession;
+          let releaseGroups;
+          const sessionGate = new Promise((resolve) => {
+            releaseSession = resolve;
+          });
+          const groupsGate = new Promise((resolve) => {
+            releaseGroups = resolve;
+          });
+          window.__releaseSession = releaseSession;
+          window.__releaseGroups = releaseGroups;
+          window.__groupsResponseReady = false;
+          window.fetch = async (...args) => {
+            const input = args[0];
+            const url = typeof input === "string" ? input : input.url;
+            if (url.endsWith("/api/auth/session")) {
+              await sessionGate;
+            }
+            const response = await nativeFetch(...args);
+            if (url.endsWith("/api/groups")) {
+              window.__groupsResponseReady = true;
+              await groupsGate;
+            }
+            return response;
+          };
+        })();
+        """
+    )
     page.goto(base_url)
     page.route(
         "**/api/import",
@@ -255,12 +355,17 @@ def test_logout_clears_retained_import_state(app, page, tmp_path):
     import_input = page.locator("#import-input")
     retry = page.locator("#import-retry-button")
     import_input.set_input_files(str(import_file))
-    expect(retry).to_be_visible()
+    page.wait_for_function("!document.querySelector('#import-retry-button').hidden")
 
+    page.evaluate("window.__releaseSession()")
+    expect(page.locator("#app-view")).to_be_visible()
+    expect(retry).to_be_visible()
+    page.wait_for_function("window.__groupsResponseReady === true")
     page.get_by_role("button", name="Log out").click()
 
     expect(page.locator("#login-view")).to_be_visible()
     assert import_input.evaluate("input => input.files.length") == 0
     expect(retry).to_be_hidden()
     expect(retry).to_be_disabled()
+    page.evaluate("window.__releaseGroups()")
     expect(page.locator("#groups")).to_be_empty()

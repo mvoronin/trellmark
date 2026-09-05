@@ -1,20 +1,24 @@
+from dataclasses import asdict
 from datetime import datetime
 
 import pytest
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
+from tests.bookmarks.helpers import url_payload, url_payloads
 from tests.helpers import (
     assert_validation_error,
     http_json,
+    run_async,
     url_ids_in,
     urls_in,
 )
+from trellmark.bookmarks.domain import SetImportant, SetImportantSucceeded, URLNotFound
 
 
 def test_get_urls_returns_saved_urls(app):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
-    trellmark.add_url("https://two.example")
+    bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_url("https://two.example")
 
     status, payload = http_json(base_url, "/api/urls")
 
@@ -25,9 +29,9 @@ def test_get_urls_returns_saved_urls(app):
 
 
 def test_read_url_records_includes_url_id(app):
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
-    records = trellmark.read_url_records()
+    records = url_payloads()
 
     assert records[0]["id"] == 1
     assert records[0]["url"] == "https://one.example"
@@ -38,9 +42,9 @@ def test_read_url_records_includes_url_id(app):
 
 
 def test_read_group_records_includes_nested_url_id(app):
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
-    groups = trellmark.read_group_records()
+    groups = bookmark_helpers.group_payloads()
 
     assert groups[0]["urls"][0]["id"] == 1
     assert groups[0]["urls"][0]["url"] == "https://one.example"
@@ -49,41 +53,56 @@ def test_read_group_records_includes_nested_url_id(app):
     assert groups[0]["urls"][0]["version"] == 1
 
 
-def test_set_url_important_updates_flat_and_grouped_records(app):
-    record = trellmark.add_url("https://one.example")
+def test_set_url_important_updates_flat_and_grouped_records(app, bookmarks_service):
+    record = bookmark_helpers.seed_url("https://one.example")
 
-    updated = trellmark.set_url_important(record["id"], True)
+    outcome = run_async(
+        lambda: bookmarks_service.set_important(SetImportant(record["id"], True))
+    )
+    assert isinstance(outcome, SetImportantSucceeded)
+    updated = asdict(outcome.record)
 
     assert updated["important"] is True
     assert updated["version"] == record["version"]
-    assert trellmark.read_url_records()[0]["important"] is True
-    assert trellmark.read_group_records()[0]["urls"][0]["important"] is True
+    assert url_payloads()[0]["important"] is True
+    assert bookmark_helpers.group_payloads()[0]["urls"][0]["important"] is True
 
-    updated = trellmark.set_url_important(record["id"], False)
+    outcome = run_async(
+        lambda: bookmarks_service.set_important(SetImportant(record["id"], False))
+    )
+    assert isinstance(outcome, SetImportantSucceeded)
+    updated = asdict(outcome.record)
 
     assert updated["important"] is False
     assert updated["version"] == record["version"]
-    assert trellmark.read_url_records()[0]["important"] is False
-    assert trellmark.read_group_records()[0]["urls"][0]["important"] is False
+    assert url_payloads()[0]["important"] is False
+    assert bookmark_helpers.group_payloads()[0]["urls"][0]["important"] is False
 
 
-def test_set_url_important_returns_none_for_missing_id(app):
-    assert trellmark.set_url_important(999, True) is None
+def test_set_url_important_returns_not_found_for_missing_id(app, bookmarks_service):
+    assert run_async(
+        lambda: bookmarks_service.set_important(SetImportant(999, True))
+    ) == URLNotFound(999)
 
 
-def test_non_content_metadata_changes_do_not_increment_url_version(app):
-    record = trellmark.add_url("https://one.example")
+def test_non_content_metadata_changes_do_not_increment_url_version(
+    app, bookmarks_service
+):
+    record = bookmark_helpers.seed_url("https://one.example")
 
-    trellmark.update_url_created_at(record["id"], "2026-08-02 12:00:00")
-    trellmark.set_url_important(record["id"], True)
+    bookmark_helpers.seed_created_at(record["id"], "2026-08-02 12:00:00")
+    outcome = run_async(
+        lambda: bookmarks_service.set_important(SetImportant(record["id"], True))
+    )
+    assert isinstance(outcome, SetImportantSucceeded)
 
-    updated = trellmark.read_url_record_by_id(record["id"])
+    updated = url_payload(record["id"])
     assert updated["version"] == record["version"]
 
 
 def test_get_urls_includes_iso_utc_timestamp(app):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     _, payload = http_json(base_url, "/api/urls")
 
@@ -95,7 +114,7 @@ def test_get_urls_includes_iso_utc_timestamp(app):
 
 def test_patch_url_important_sets_and_clears_flag(app):
     base_url, _ = app
-    url = trellmark.add_url("https://one.example")
+    url = bookmark_helpers.seed_url("https://one.example")
 
     status, payload = http_json(
         base_url,
@@ -108,7 +127,7 @@ def test_patch_url_important_sets_and_clears_flag(app):
     assert payload["url"]["id"] == url["id"]
     assert payload["url"]["important"] is True
     assert payload["groups"][0]["urls"][0]["important"] is True
-    assert trellmark.read_url_record_by_id(url["id"])["important"] is True
+    assert url_payload(url["id"])["important"] is True
 
     status, payload = http_json(
         base_url,
@@ -121,7 +140,7 @@ def test_patch_url_important_sets_and_clears_flag(app):
     assert payload["url"]["id"] == url["id"]
     assert payload["url"]["important"] is False
     assert payload["groups"][0]["urls"][0]["important"] is False
-    assert trellmark.read_url_record_by_id(url["id"])["important"] is False
+    assert url_payload(url["id"])["important"] is False
 
 
 def test_patch_url_important_returns_not_found_for_missing_url(app):
@@ -150,7 +169,7 @@ def test_patch_url_important_returns_not_found_for_missing_url(app):
 )
 def test_patch_url_important_rejects_invalid_payload(app, payload):
     base_url, _ = app
-    url = trellmark.add_url("https://one.example")
+    url = bookmark_helpers.seed_url("https://one.example")
 
     status, response = http_json(
         base_url,
@@ -160,4 +179,4 @@ def test_patch_url_important_rejects_invalid_payload(app, payload):
     )
 
     assert_validation_error(status, response)
-    assert trellmark.read_url_record_by_id(url["id"])["important"] is False
+    assert url_payload(url["id"])["important"] is False
