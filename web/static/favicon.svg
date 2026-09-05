@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Trellmark">
+  <title>Trellmark</title>
+  <!-- A T whose stem is cut like a bookmark ribbon. Drawn on a 32 unit grid
+       with every coordinate on an even number, so the geometry halves cleanly
+       into 16 device pixels. Both colors are app tokens resolved to sRGB: the
+       plate is the red accent, the mark is the lightest neutral. Self-contained
+       by requirement: no external reference, no embedded raster, no script. -->
+  <rect width="32" height="32" rx="7" fill="#8a423b"/>
+  <path fill="#f9f6f2" d="M6 5h20v6h-5v17l-5-6-5 6V11H6z"/>
+</svg>

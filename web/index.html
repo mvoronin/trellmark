@@ -4,6 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Trellmark</title>
+    <!-- The SVG is what any current browser uses; the ICO is the fallback for
+         the ones that ask for a raster. Both are declared under /static, which
+         this app already serves. A bare /favicon.ico at the origin root — what
+         a bookmark or a feed reader asks for with no link to go on — is the
+         edge's to answer, and the edge lives in the infrastructure repo. -->
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/static/favicon.ico" sizes="48x48 32x32 16x16">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <!-- Pin the saved theme before first paint so an explicit light/dark
          choice doesn't flash the wrong colors. "system" needs nothing here —
          color-scheme follows the OS. app.js keeps the toggle in sync. -->
