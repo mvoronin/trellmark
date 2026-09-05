@@ -3,7 +3,7 @@ import json
 from playwright.sync_api import expect
 from sqlalchemy import text
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import db_connection
 from tests.postgres import TEST_LOGIN, TEST_PASSWORD
 
@@ -19,9 +19,9 @@ def _populate_private_dom(page, base_url):
     private_domain = "private-dom.example"
     url_title = "Private DOM Title"
     url_value = "https://private-dom-url.example"
-    group = trellmark.add_group(group_name, domains=[private_domain])
-    saved = trellmark.add_url(url_value, title=url_title)
-    trellmark.move_url_to_group(saved["id"], group["id"])
+    group = bookmark_helpers.seed_group(group_name, domains=[private_domain])
+    saved = bookmark_helpers.seed_url(url_value, title=url_title)
+    bookmark_helpers.seed_membership(saved["id"], group["id"])
 
     page.goto(base_url)
     expect(page.get_by_role("link", name=url_title)).to_be_visible()
@@ -89,7 +89,7 @@ def test_unauthenticated_startup_shows_only_login_and_fetches_no_private_data(
     app, unauthenticated_page
 ):
     base_url, _ = app
-    trellmark.add_url("https://private.example")
+    bookmark_helpers.seed_url("https://private.example")
     requests = []
     unauthenticated_page.on("request", lambda req: requests.append(req.url))
 
@@ -107,7 +107,7 @@ def test_login_error_is_uniform_and_success_reveals_private_application(
     app, unauthenticated_page
 ):
     base_url, _ = app
-    trellmark.add_url("https://private.example")
+    bookmark_helpers.seed_url("https://private.example")
     unauthenticated_page.goto(base_url)
     unauthenticated_page.get_by_label("Login").fill("unknown")
     unauthenticated_page.get_by_label("Password").fill("wrong")

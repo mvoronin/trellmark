@@ -1,14 +1,30 @@
 import asyncio
-from collections.abc import Awaitable, Callable
+import codecs
+import json
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from typing import cast
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
-from aiohttp import ClientError, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
 
-from . import page_titles, storage
-from .storage_types import SiteIconCacheRecord
+from ..platform.network import read_bounded_body, resolves_to_public_host
+from .application import SiteIconCache, SiteIconFetcher
+from .domain import SiteIcon, SiteIconCacheRecord, clean_title_text
+
+logger = logging.getLogger(__name__)
+
+MAX_TITLE_BYTES = 1_048_576
+MAX_OEMBED_BYTES = 65_536
+TITLE_READ_CHUNK_BYTES = 65_536
+MAX_REDIRECTS = 3
+TITLE_FETCH_TIMEOUT_SECONDS = 3
+HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+YOUTUBE_OEMBED_URL = "https://www.youtube.com/oembed"
 
 MAX_ICON_BYTES = 256 * 1024
 MAX_ICON_CANDIDATES = 3
@@ -22,12 +38,6 @@ ICO_MEDIA_TYPE = "image/vnd.microsoft.icon"
 ICO_SOURCE_MEDIA_TYPES = {"image/x-icon", ICO_MEDIA_TYPE}
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 ICO_MAGIC = b"\x00\x00\x01\x00"
-
-
-@dataclass(frozen=True, slots=True)
-class SiteIcon:
-    data: bytes
-    media_type: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +75,6 @@ class _IconLinkParser(HTMLParser):
         self.candidates.append(candidate)
 
 
-type IconFetcher = Callable[[str], Awaitable[SiteIcon | None]]
 type Clock = Callable[[], datetime]
 
 
@@ -142,14 +151,19 @@ async def _discover_icon_candidates(
     response = await _fetch_public_body(
         session,
         page_url,
-        page_titles.MAX_TITLE_BYTES,
+        MAX_TITLE_BYTES,
     )
-    if response is None or response.media_type not in page_titles.HTML_CONTENT_TYPES:
+    if response is None or response.media_type not in HTML_CONTENT_TYPES:
         return []
 
     parser = _IconLinkParser(response.final_url)
-    parser.feed(response.data.decode(response.charset or "utf-8", errors="replace"))
-    parser.close()
+    try:
+        parser.feed(response.data.decode(response.charset or "utf-8", errors="replace"))
+        parser.close()
+    except LookupError, ValueError:
+        # Invalid HTTP charsets, Unicode and HTML entities are remote document
+        # failures. Favicon fallback remains available without an anomaly warning.
+        return []
     return parser.candidates
 
 
@@ -159,11 +173,11 @@ async def _fetch_public_body(
     limit: int,
 ) -> _FetchedBody | None:
     for _ in range(MAX_ICON_REDIRECTS + 1):
-        if not await page_titles.resolves_to_public_host(url):
+        if not await resolves_to_public_host(url):
             return None
         try:
             async with session.get(url, allow_redirects=False) as response:
-                if response.status in page_titles.REDIRECT_STATUSES:
+                if response.status in REDIRECT_STATUSES:
                     location = response.headers.get("Location")
                     if not location:
                         return None
@@ -172,7 +186,7 @@ async def _fetch_public_body(
                 if 300 <= response.status < 400 or response.status >= 400:
                     return None
 
-                body = await page_titles.read_limited_body(response, limit)
+                body = await read_bounded_body(response, limit)
                 if body is None:
                     return None
                 content_type = response.headers.get("Content-Type", "")
@@ -217,8 +231,8 @@ def _utc_now() -> datetime:
 def _cached_icon(record: SiteIconCacheRecord | None) -> SiteIcon | None:
     if record is None:
         return None
-    data = record["icon_bytes"]
-    media_type = record["media_type"]
+    data = record.icon_bytes
+    media_type = record.media_type
     if data is None or media_type is None:
         return None
     return SiteIcon(data, media_type)
@@ -230,19 +244,34 @@ class SiteIconService:
     def __init__(
         self,
         *,
-        fetcher: IconFetcher = fetch_site_icon,
+        cache: SiteIconCache,
+        fetcher: SiteIconFetcher = fetch_site_icon,
         clock: Clock = _utc_now,
     ) -> None:
+        self._cache = cache
         self._fetcher = fetcher
         self._clock = clock
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_ORIGINS)
         self._inflight: dict[str, asyncio.Task[SiteIcon | None]] = {}
+        self._lookups: dict[str, asyncio.Task[SiteIcon | None]] = {}
 
     async def get(self, url: str) -> SiteIcon | None:
         origin = normalize_site_origin(url)
-        cached = storage.read_site_icon_cache(origin)
+        # Cache reads now await a worker. Share that lookup before yielding so
+        # the first caller still chooses the URL for this origin's singleflight.
+        task = self._lookups.get(origin)
+        if task is None:
+            task = asyncio.create_task(self._get(origin, url))
+            self._lookups[origin] = task
+            task.add_done_callback(
+                lambda completed, key=origin: self._lookup_done(key, completed)
+            )
+        return await task
+
+    async def _get(self, origin: str, url: str) -> SiteIcon | None:
+        cached = await self._cache.read(origin)
         icon = _cached_icon(cached)
-        if cached is not None and cached["retry_after"] > self._clock():
+        if cached is not None and cached.retry_after > self._clock():
             return icon
 
         task = self._refresh_task(origin, url)
@@ -257,9 +286,11 @@ class SiteIconService:
 
     async def wait_for_idle(self) -> None:
         """Wait for scheduled stale refreshes, primarily for clean shutdown/tests."""
-        while self._inflight:
+        while self._inflight or self._lookups:
             await asyncio.gather(
-                *tuple(self._inflight.values()), return_exceptions=True
+                *tuple(self._inflight.values()),
+                *tuple(self._lookups.values()),
+                return_exceptions=True,
             )
             # A gather over tasks that are already done may complete without
             # yielding; give their removal callbacks one loop turn.
@@ -286,6 +317,7 @@ class SiteIconService:
             try:
                 fetched = await self._fetcher(url)
             except Exception:
+                logger.warning("Unexpected site icon fetch failure.", exc_info=True)
                 fetched = None
 
         now = self._clock()
@@ -293,13 +325,12 @@ class SiteIconService:
             None if fetched is None else validate_icon(fetched.media_type, fetched.data)
         )
         if icon is None:
-            storage.upsert_site_icon_failure(origin, now + NEGATIVE_TTL)
+            await self._cache.failure(origin, now + NEGATIVE_TTL)
             return None
 
-        storage.upsert_site_icon_success(
+        await self._cache.success(
             origin,
-            icon.data,
-            icon.media_type,
+            icon,
             now,
             now + POSITIVE_TTL,
         )
@@ -314,3 +345,190 @@ class SiteIconService:
             del self._inflight[origin]
         if not completed.cancelled():
             completed.exception()
+
+    def _lookup_done(
+        self,
+        origin: str,
+        completed: asyncio.Task[SiteIcon | None],
+    ) -> None:
+        if self._lookups.get(origin) is completed:
+            del self._lookups[origin]
+        if not completed.cancelled():
+            completed.exception()
+
+
+class TitleParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_title = False
+        self._found_title = False
+        self._parts: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag.lower() == "title" and not self._found_title:
+            self._in_title = True
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title" and self._in_title:
+            self._in_title = False
+            self._found_title = True
+
+    def title(self) -> str | None:
+        return clean_title_text("".join(self._parts))
+
+    @property
+    def found_title(self) -> bool:
+        return self._found_title
+
+
+async def fetch_url_title(url: str) -> str | None:
+    timeout = ClientTimeout(total=TITLE_FETCH_TIMEOUT_SECONDS)
+    try:
+        async with asyncio.timeout(TITLE_FETCH_TIMEOUT_SECONDS):
+            async with ClientSession(
+                timeout=timeout,
+                headers={"User-Agent": "trellmark/0.1"},
+            ) as session:
+                if _is_youtube_url(url):
+                    title = await _fetch_youtube_oembed_title(session, url)
+                    if title is not None:
+                        return title
+
+                for _ in range(MAX_REDIRECTS + 1):
+                    if not await resolves_to_public_host(url):
+                        return None
+
+                    async with session.get(url, allow_redirects=False) as response:
+                        if response.status in REDIRECT_STATUSES:
+                            location = response.headers.get("Location")
+                            if not location:
+                                return None
+                            url = urljoin(str(response.url), location)
+                            continue
+
+                        if 300 <= response.status < 400 or response.status >= 400:
+                            return None
+                        content_type = response.headers.get("Content-Type", "")
+                        media_type = content_type.split(";", 1)[0].strip().lower()
+                        if media_type and media_type not in HTML_CONTENT_TYPES:
+                            return None
+
+                        charset = response.charset or "utf-8"
+                        return await _read_response_title(response, charset)
+    except ClientError, TimeoutError:
+        return None
+
+    return None
+
+
+async def _fetch_youtube_oembed_title(
+    session: ClientSession,
+    url: str,
+) -> str | None:
+    if not await resolves_to_public_host(YOUTUBE_OEMBED_URL):
+        return None
+
+    try:
+        async with session.get(
+            YOUTUBE_OEMBED_URL,
+            params={"format": "json", "url": url},
+            allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                return None
+            body = await read_bounded_body(response, MAX_OEMBED_BYTES)
+    except ClientError:
+        return None
+
+    if body is None:
+        return None
+    try:
+        payload = cast(object, json.loads(body))
+    except ValueError, RecursionError:
+        # JSON syntax, Unicode decoding, integer limits and excessive nesting
+        # are all failures of this bounded untrusted document.
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    title = cast(dict[object, object], payload).get("title")
+    if not isinstance(title, str):
+        return None
+    return clean_title_text(title)
+
+
+async def _read_response_title(
+    response: ClientResponse,
+    charset: str,
+) -> str | None:
+    try:
+        # bytes.decode rejects binary and str-to-str codecs advertised as an
+        # HTTP charset, before their incremental decoders can assert or mis-type.
+        b"\0".decode(charset, errors="replace")
+        decoder = codecs.getincrementaldecoder(charset)(errors="replace")
+    except LookupError:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    parser = TitleParser()
+    remaining = MAX_TITLE_BYTES
+    while remaining > 0:
+        chunk = await response.content.read(min(TITLE_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            try:
+                parser.feed(decoder.decode(b"", final=True))
+                parser.close()
+            except ValueError:
+                # UnicodeDecodeError and malformed numeric entities are remote
+                # content failures. Do not contain network/repository anomalies.
+                return None
+            return parser.title()
+
+        remaining -= len(chunk)
+        try:
+            parser.feed(decoder.decode(chunk))
+        except ValueError:
+            return None
+        if parser.found_title:
+            return parser.title()
+
+    return None
+
+
+def _is_youtube_url(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname
+    except ValueError:
+        return False
+    if host is None:
+        return False
+    host = host.lower()
+    return (
+        host == "youtu.be"
+        or host.endswith(".youtu.be")
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtube-nocookie.com"
+        or host.endswith(".youtube-nocookie.com")
+    )
+
+
+def parse_title(body: bytes, charset: str = "utf-8") -> str | None:
+    try:
+        try:
+            html = body.decode(charset, errors="replace")
+        except LookupError:
+            html = body.decode("utf-8", errors="replace")
+
+        parser = TitleParser()
+        parser.feed(html)
+        return parser.title()
+    except ValueError:
+        return None

@@ -2,6 +2,8 @@ from collections.abc import Mapping
 
 from fastapi.responses import JSONResponse
 
+__all__ = ["error_response"]
+
 
 def error_response(
     message: str,

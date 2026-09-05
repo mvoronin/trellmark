@@ -1,13 +1,19 @@
+import json
 import threading
+from collections import Counter
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 from urllib import error, request
 
 import pytest
-from sqlalchemy import text
+from anyio import CapacityLimiter
+from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-import trellmark
+from tests.backup.helpers import ObservedBackupFactory
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import (
     _authentication_headers,
-    capture_connection_identities,
     capture_storage_statements,
     group_in,
     group_names_in,
@@ -16,10 +22,19 @@ from tests.helpers import (
     http_raw,
     logical_bookmark_snapshot,
     public_bookmark_snapshot,
+    run_async,
 )
-from trellmark import handlers, storage
 from trellmark.app import MAX_REQUEST_BODY_BYTES, create_app
-from trellmark.models import ImportDocument
+from trellmark.backup import domain as backup_domain
+from trellmark.backup.api import ImportDocument
+from trellmark.backup.application import BackupApplicationService, ImportInvalid
+from trellmark.backup.persistence import (
+    PostgresBackupUnitOfWorkFactory,
+    PostgresExportSnapshotFactory,
+)
+from trellmark.bookmarks import persistence
+from trellmark.platform import runtime
+from trellmark.platform.runtime import AnyIOWorkRunner
 
 INVALID_IMPORT = {"error": "Invalid import file.", "code": "invalid_import"}
 IMPORT_CONFLICT = {
@@ -66,6 +81,58 @@ def _is_dml(statement: str) -> bool:
     return statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
 
 
+def test_import_complete_transaction_runs_outside_request_thread(app, monkeypatch):
+    base_url, _ = app
+    assert http_json(base_url, "/api/groups")[0] == 200
+    engine = runtime.get_engine()
+    request_threads = []
+    work_events = []
+    import_connections = set()
+    original = ImportDocument.to_domain
+
+    def observe_transport(document):
+        request_threads.append(threading.get_ident())
+        return original(document)
+
+    def observe_sql(connection, _cursor, statement, *_args):
+        if "pg_try_advisory_xact_lock" in statement:
+            import_connections.add(connection)
+        if connection in import_connections:
+            work_events.append(("sql", threading.get_ident()))
+
+    def observe_commit(connection):
+        if connection in import_connections:
+            work_events.append(("commit", threading.get_ident()))
+
+    def observe_return(_dbapi, _record):
+        if work_events and work_events[-1][0] == "commit":
+            work_events.append(("close", threading.get_ident()))
+
+    monkeypatch.setattr(ImportDocument, "to_domain", observe_transport)
+    listeners = (
+        ("before_cursor_execute", observe_sql),
+        ("commit", observe_commit),
+        ("checkin", observe_return),
+    )
+    for name, listener in listeners:
+        event.listen(engine, name, listener)
+    try:
+        assert (
+            http_json(
+                base_url, "/api/import", method="POST", payload=_single_group_document()
+            )[0]
+            == 200
+        )
+    finally:
+        for name, listener in listeners:
+            event.remove(engine, name, listener)
+    assert len(import_connections) == 1
+    assert work_events[-2:][0][0] == "commit"
+    assert work_events[-1][0] == "close"
+    assert len({thread for _, thread in work_events}) == 1
+    assert set(request_threads).isdisjoint(thread for _, thread in work_events)
+
+
 def test_import_uses_single_connection_and_outer_transaction(app, monkeypatch):
     base_url, _ = app
     # Authenticate before instrumenting content storage so the identity boundary's
@@ -74,8 +141,15 @@ def test_import_uses_single_connection_and_outer_transaction(app, monkeypatch):
     assert status == 200
 
     statements, engine = capture_storage_statements(monkeypatch)
-    connection_identities, identity_engine = capture_connection_identities(monkeypatch)
-    assert identity_engine is engine
+    connection_identities = set()
+
+    def capture_import_connection(connection, _cursor, statement, *_args):
+        if "pg_try_advisory_xact_lock" in statement:
+            connection_identities.add(
+                (id(connection), id(connection.get_transaction()))
+            )
+
+    event.listen(engine, "before_cursor_execute", capture_import_connection)
     try:
         status, payload = http_json(
             base_url,
@@ -104,16 +178,21 @@ def test_import_validation_before_dml(app, monkeypatch):
     assert status == 200
 
     statements, engine = capture_storage_statements(monkeypatch)
-    original_validate = ImportDocument.validate_against
+    original_validate = backup_domain.validate_resulting_import_hierarchy
     validation_statement_count: list[int] = []
 
-    def validate_inside_transaction(self, existing_groups):
+    def validate_inside_transaction(groups, existing_groups):
         validation_statement_count.append(len(statements))
         assert any("pg_try_advisory_xact_lock" in statement for statement in statements)
         assert not any(_is_dml(statement) for statement in statements)
-        return original_validate(self, existing_groups)
+        assert any("FOR UPDATE" in statement for statement in statements)
+        return original_validate(groups, existing_groups)
 
-    monkeypatch.setattr(ImportDocument, "validate_against", validate_inside_transaction)
+    monkeypatch.setattr(
+        backup_domain,
+        "validate_resulting_import_hierarchy",
+        validate_inside_transaction,
+    )
     try:
         status, payload = http_json(
             base_url,
@@ -198,26 +277,26 @@ def _rollback_document() -> ImportDocument:
 
 
 def _seed_rollback_state() -> None:
-    old_parent = trellmark.add_group("Old Parent")
-    destination = trellmark.add_group("Destination")
+    old_parent = bookmark_helpers.seed_group("Old Parent")
+    destination = bookmark_helpers.seed_group("Destination")
     assert old_parent is not None
     assert destination is not None
-    imported_child = trellmark.add_group(
+    imported_child = bookmark_helpers.seed_group(
         "Imported Child",
         domains=["old.example"],
         parent_id=old_parent["id"],
     )
     assert imported_child is not None
-    existing = trellmark.add_url(
+    existing = bookmark_helpers.seed_url(
         "https://existing.example/item",
         title="Existing metadata",
     )
     assert existing is not None
-    trellmark.update_url_created_at(
+    bookmark_helpers.seed_created_at(
         existing["id"],
-        _rollback_document().to_storage_document()["groups"][0]["urls"][0][
-            "created_at"
-        ],
+        backup_domain.import_timestamp(
+            _rollback_document().to_domain().groups[0].urls[0].created_at
+        ),
     )
 
 
@@ -247,13 +326,13 @@ def test_import_rollback_each_mutation_stage_and_retry_cleanly(
         if stage == failure_stage and occurrences[stage] == failure_occurrence:
             raise RuntimeError("Synthetic import stage failure.")
 
-    assert storage.IMPORT_MUTATION_STAGES == EXPECTED_IMPORT_MUTATION_STAGES
     with pytest.raises(RuntimeError, match="Synthetic import stage failure"):
-        storage.import_saved_data(
-            document.to_storage_document(),
-            validate_against=document.validate_against,
-            after_stage=fail_after_stage,
+        service = BackupApplicationService(
+            AnyIOWorkRunner(CapacityLimiter(1)),
+            ObservedBackupFactory(fail_after_stage),
+            PostgresExportSnapshotFactory(runtime.get_engine),
         )
+        run_async(lambda: service.import_document(document.to_domain()))
 
     assert failure_stage in reached_stages
     assert logical_bookmark_snapshot() == direct_before
@@ -278,11 +357,224 @@ def test_import_rollback_each_mutation_stage_and_retry_cleanly(
     assert imported["important"] is True
 
 
+STAGE_OCCURRENCES = {
+    "group_metadata": 3,
+    "hierarchy_detach": 2,
+    "hierarchy_attach": 2,
+    "sibling_order": 3,
+    "url_insert": 2,
+    "membership_insert": 3,
+    "url_metadata": 2,
+}
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "failure_occurrence"),
+    [
+        (stage, occurrence)
+        for stage in EXPECTED_IMPORT_MUTATION_STAGES
+        for occurrence in range(1, STAGE_OCCURRENCES[stage] + 1)
+    ],
+)
+def test_import_http_rollback_every_stage_occurrence_and_identical_retry(
+    app, backup_uow_factory, failure_stage, failure_occurrence
+):
+    base_url, _ = app
+    _seed_rollback_state()
+    parent = bookmark_helpers.group_by_name("Old Parent")
+    second = bookmark_helpers.seed_group("Second Child", parent_id=parent["id"])
+    assert second is not None
+    payload = _rollback_document().model_dump(mode="json")
+    payload["groups"].append(
+        {
+            "name": "Second Child",
+            "parent": "New Root",
+            "position": 0,
+            "nsfw": True,
+            "domains": ["second.example"],
+            "urls": [
+                {
+                    "url": "https://second.example/new",
+                    "title": "Second metadata",
+                    "created_at": "2026-08-30T06:30:04Z",
+                    "important": True,
+                }
+            ],
+        }
+    )
+    direct_before = logical_bookmark_snapshot()
+    public_before = public_bookmark_snapshot(base_url)
+    reached = []
+    failure = SQLAlchemyError("Synthetic stage failure; do not expose.")
+
+    def fail_after_mutation(stage):
+        reached.append(stage)
+        if stage == failure_stage and reached.count(stage) == failure_occurrence:
+            raise failure
+
+    backup_uow_factory.observer = fail_after_mutation
+    status, body, cache = _raw_import_response(
+        base_url,
+        body=json.dumps(payload).encode(),
+        headers={
+            **_authentication_headers(base_url),
+            "Origin": base_url,
+            "Content-Type": "application/json",
+        },
+    )
+    assert reached[-1] == failure_stage
+    assert reached.count(failure_stage) == failure_occurrence
+    assert (status, json.loads(body), cache) == (500, IMPORT_FAILED, "no-store")
+    assert logical_bookmark_snapshot() == direct_before
+    assert public_bookmark_snapshot(base_url) == public_before
+
+    reached.clear()
+    backup_uow_factory.observer = reached.append
+    status, result = http_json(base_url, "/api/import", method="POST", payload=payload)
+    assert status == 200 and result["imported"] == 2 and result["skipped"] == 1
+    assert Counter(reached) == STAGE_OCCURRENCES
+    assert grouped_urls_in(result, "Imported Child") == ["https://rollback.example/new"]
+    assert grouped_urls_in(result, "New Root") == ["https://rollback.example/new"]
+    assert grouped_urls_in(result, "Second Child") == ["https://second.example/new"]
+    first = group_in(result, "Imported Child")["urls"][0]
+    assert (first["title"], first["created_at"], first["important"]) == (
+        "First metadata",
+        "2026-08-30T06:30:01Z",
+        True,
+    )
+    second_result = group_in(result, "Second Child")
+    assert second_result["id"] == second["id"]
+    assert second_result["parent_id"] == group_in(result, "New Root")["id"]
+    assert second_result["domains"] == ["second.example"]
+    assert second_result["urls"][0]["created_at"] == "2026-08-30T06:30:04Z"
+
+
+def test_import_production_exposes_no_fault_callback_or_stage_registry():
+    root = Path(__file__).resolve().parents[2] / "trellmark"
+    for path in root.rglob("*.py"):
+        source = path.read_text()
+        assert "IMPORT_MUTATION_STAGES" not in source
+        assert "ImportStageHook" not in source
+        assert "after_stage" not in source
+
+
+@pytest.mark.parametrize("scope", ["import", "export"])
+@pytest.mark.parametrize("failure_point", ["operation", "commit", "enter"])
+def test_import_and_export_preserve_primary_failure_through_cleanup(
+    database, scope, failure_point
+):
+    if scope == "export" and failure_point == "commit":
+        # Export has no commit capability; cover snapshot configuration failure.
+        failure_point = "configure"
+    engine = runtime.get_engine()
+    failure = RuntimeError("Primary adapter failure")
+    events = []
+
+    class TransactionProxy:
+        def __init__(self, inner):
+            self.inner = inner
+
+        @property
+        def is_active(self):
+            return self.inner.is_active
+
+        def commit(self):
+            events.append("commit")
+            raise failure
+
+        def rollback(self):
+            events.append("rollback")
+            self.inner.rollback()
+            raise RuntimeError("Secondary rollback failure")
+
+    class ConnectionProxy:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def begin(self):
+            if failure_point == "enter":
+                raise failure
+            return TransactionProxy(self.inner.begin())
+
+        def execution_options(self, **options):
+            if failure_point == "configure":
+                raise failure
+            return self.inner.execution_options(**options)
+
+        def close(self):
+            events.append("close")
+            self.inner.close()
+            raise RuntimeError("Secondary close failure")
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    class EngineProxy:
+        def connect(self):
+            events.append("connect")
+            return ConnectionProxy(engine.connect())
+
+    factory_type = (
+        PostgresBackupUnitOfWorkFactory
+        if scope == "import"
+        else PostgresExportSnapshotFactory
+    )
+    factory = factory_type(EngineProxy)
+    with pytest.raises(RuntimeError) as caught:
+        with factory() as uow:
+            if failure_point == "commit":
+                uow.commit()
+            raise failure
+    assert caught.value is failure
+    assert events[-1] == "close"
+    assert events.count("rollback") == (
+        0 if failure_point in {"enter", "configure"} else 1
+    )
+    assert engine.pool.checkedout() == 0
+
+
+def test_import_coordinator_defaults_to_rollback_and_commits_only_success(database):
+    factory = PostgresBackupUnitOfWorkFactory(runtime.get_engine)
+    before = logical_bookmark_snapshot()
+    with factory() as uow:
+        uow.bookmarks.restore_group("Uncommitted", False, (), None)
+    assert logical_bookmark_snapshot() == before
+    service = create_app().state.backup_application_service
+    assert service.work_runner.limiter.total_tokens == 1
+    with pytest.raises(FrozenInstanceError):
+        service.uow_factory = factory
+    invalid = _single_group_document(with_url=False)
+    invalid["groups"][0]["parent"] = "Missing"
+    outcome = run_async(
+        lambda: service.import_document(
+            backup_domain.normalize_import_document(invalid)
+        )
+    )
+    assert outcome == ImportInvalid()
+    assert logical_bookmark_snapshot() == before
+
+    failure = RuntimeError("Original worker failure")
+
+    def fail(_stage):
+        raise failure
+
+    failing = replace(service, uow_factory=ObservedBackupFactory(fail))
+    with pytest.raises(RuntimeError) as caught:
+        run_async(
+            lambda: failing.import_document(
+                backup_domain.normalize_import_document(_single_group_document())
+            )
+        )
+    assert caught.value is failure
+    assert logical_bookmark_snapshot() == before
+    assert runtime.get_engine().pool.checkedout() == 0
+
+
 def test_invalid_imports_execute_no_dml(app, monkeypatch):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
+    parent = bookmark_helpers.seed_group("Parent")
     assert parent is not None
-    child = trellmark.add_group("Child", parent_id=parent["id"])
+    child = bookmark_helpers.seed_group("Child", parent_id=parent["id"])
     assert child is not None
     status, _ = http_json(base_url, "/api/groups")
     assert status == 200
@@ -360,13 +652,13 @@ def test_import_error_contract_reports_held_gate(app):
             payload=_single_group_document(with_url=False),
         )
 
-    with trellmark.get_engine().connect() as blocker:
+    with runtime.get_engine().connect() as blocker:
         with blocker.begin():
             acquired = blocker.scalar(
                 text("SELECT pg_try_advisory_xact_lock(:namespace, :key)"),
                 {
-                    "namespace": storage.BOOKMARK_MUTATION_LOCK_NAMESPACE,
-                    "key": storage.BOOKMARK_MUTATION_LOCK_KEY,
+                    "namespace": persistence.BOOKMARK_MUTATION_LOCK_NAMESPACE,
+                    "key": persistence.BOOKMARK_MUTATION_LOCK_KEY,
                 },
             )
             assert acquired is True
@@ -379,62 +671,64 @@ def test_import_error_contract_reports_held_gate(app):
     assert outcome["response"] == (409, IMPORT_CONFLICT)
 
 
-def test_import_post_validation_value_error_is_500_after_rollback(app, monkeypatch):
+def test_import_post_validation_database_error_is_500_after_rollback(
+    app,
+    caplog,
+    backup_uow_factory,
+):
     base_url, _ = app
     _seed_rollback_state()
     document = _rollback_document()
     direct_before = logical_bookmark_snapshot()
     public_before = public_bookmark_snapshot(base_url)
-    original_import = handlers.import_saved_data
     leak_markers = (
         "SELECT password_hash FROM administrator",
         "postgresql://admin:secret@database.invalid/trellmark",
         "private-host.invalid",
         'payload={"url":"https://private.invalid"}',
+        "private-session-token",
+        "private saved content",
     )
 
-    def fail_after_validation(document, *, validate_against):
-        def fail_after_stage(_stage: str) -> None:
-            raise ValueError(" | ".join(leak_markers))
-
-        return original_import(
-            document,
-            validate_against=validate_against,
-            after_stage=fail_after_stage,
+    def fail_after_stage(_stage: str) -> None:
+        raise OperationalError(
+            leak_markers[0],
+            {"private_parameter": " | ".join(leak_markers[1:])},
+            RuntimeError(" | ".join(leak_markers)),
+            hide_parameters=True,
         )
 
-    monkeypatch.setattr(handlers, "import_saved_data", fail_after_validation)
+    backup_uow_factory.observer = fail_after_stage
 
-    status, payload = http_json(
+    request_headers = {
+        **_authentication_headers(base_url),
+        "Content-Type": "application/json",
+        "Origin": base_url,
+    }
+    status, response_body, cache_control = _raw_import_response(
         base_url,
-        "/api/import",
-        method="POST",
-        payload=document.model_dump(mode="json"),
+        body=json.dumps(document.model_dump(mode="json")).encode("utf-8"),
+        headers=request_headers,
     )
+    payload = json.loads(response_body)
 
     assert logical_bookmark_snapshot() == direct_before
     assert public_bookmark_snapshot(base_url) == public_before
     assert (status, payload) == (500, IMPORT_FAILED)
+    assert cache_control == "no-store"
     rendered = str(payload)
     assert all(marker not in rendered for marker in leak_markers)
+    assert all(marker not in caplog.text for marker in leak_markers)
 
 
-def test_import_unexpected_failure_is_redacted_after_rollback(app, monkeypatch):
+def test_import_unexpected_failure_is_redacted_after_rollback(app, backup_uow_factory):
     base_url, _ = app
-    original_import = handlers.import_saved_data
     leak_marker = "synthetic SQL and credential marker"
 
-    def fail_unexpectedly(document, *, validate_against):
-        def fail_after_stage(_stage: str) -> None:
-            raise RuntimeError(leak_marker)
+    def fail_after_stage(_stage: str) -> None:
+        raise SQLAlchemyError(leak_marker)
 
-        return original_import(
-            document,
-            validate_against=validate_against,
-            after_stage=fail_after_stage,
-        )
-
-    monkeypatch.setattr(handlers, "import_saved_data", fail_unexpectedly)
+    backup_uow_factory.observer = fail_after_stage
     status, payload = http_json(
         base_url,
         "/api/import",

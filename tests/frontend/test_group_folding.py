@@ -1,11 +1,11 @@
 from playwright.sync_api import expect
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 
 
 def test_frontend_folds_and_unfolds_group(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     page.goto(base_url)
     link = page.get_by_role("link", name="one.example")
@@ -20,7 +20,7 @@ def test_frontend_folds_and_unfolds_group(app, page):
 
 def test_frontend_fold_state_survives_reload(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     page.goto(base_url)
     page.get_by_role("button", name="Toggle default").click()
@@ -35,10 +35,10 @@ def test_frontend_fold_state_survives_reload(app, page):
 
 def test_frontend_fold_is_keyed_by_group(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
-    reading = trellmark.add_group("Reading")
-    moved = trellmark.add_url("https://two.example")
-    trellmark.move_url_to_group(moved["id"], reading["id"])
+    bookmark_helpers.seed_url("https://one.example")
+    reading = bookmark_helpers.seed_group("Reading")
+    moved = bookmark_helpers.seed_url("https://two.example")
+    bookmark_helpers.seed_membership(moved["id"], reading["id"])
 
     page.goto(base_url)
     page.get_by_role("button", name="Toggle default", exact=True).click()
@@ -52,7 +52,7 @@ def test_frontend_fold_is_keyed_by_group(app, page):
 
 def test_frontend_new_group_starts_unfolded(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     page.goto(base_url)
     page.get_by_role("button", name="Toggle default", exact=True).click()

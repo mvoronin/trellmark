@@ -1,45 +1,59 @@
+from dataclasses import asdict
+
 import pytest
 
-import trellmark
-from tests.helpers import RecordingTitleFetcher, http_json
+from tests.bookmarks import helpers as bookmark_helpers
+from tests.bookmarks.helpers import seed_url, url_group_ids, url_payload
+from tests.helpers import RecordingTitleFetcher, http_json, run_async
+from trellmark.bookmarks.domain import (
+    EditURL,
+    EmptyURLEdit,
+    MoveURL,
+    SetImportant,
+    SetImportantSucceeded,
+    URLUpdated,
+)
 
 
 class ConcurrentEditTitleFetcher:
     def __init__(self):
         self.url_id = None
+        self.service = None
 
     async def __call__(self, url):
         assert self.url_id is not None
-        current = trellmark.read_url_record_by_id(self.url_id)
+        assert self.service is not None
+        current = await self.service.url_by_id(self.url_id)
         assert current is not None
-        updated, error = trellmark.update_url_record(
-            self.url_id,
-            expected_version=current["version"],
-            fields={"title": "Manual title"},
+        outcome = await self.service.edit_url(
+            EditURL(self.url_id, current.version, title="Manual title")
         )
-        assert error is None
-        assert updated is not None
+        assert isinstance(outcome, URLUpdated)
         return "Fetched title"
 
 
 class ConcurrentImportantTitleFetcher:
     def __init__(self):
         self.url_id = None
+        self.service = None
 
     async def __call__(self, url):
         assert self.url_id is not None
-        updated = trellmark.set_url_important(self.url_id, True)
-        assert updated is not None
+        assert self.service is not None
+        outcome = await self.service.set_important(SetImportant(self.url_id, True))
+        assert isinstance(outcome, SetImportantSucceeded)
         return "Fetched title"
 
 
-def test_patch_url_updates_normalized_url_and_title_without_moving_groups(app):
+def test_patch_url_updates_normalized_url_and_title_without_moving_groups(
+    app, bookmarks_service
+):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    record = trellmark.add_url("https://old.example", title="Old title")
+    reading = bookmark_helpers.seed_group("Reading")
+    record = seed_url("https://old.example", title="Old title")
     assert reading is not None
     assert record is not None
-    trellmark.move_url_to_group(record["id"], reading["id"])
+    run_async(lambda: bookmarks_service.move_url(MoveURL(record["id"], reading["id"])))
 
     status, payload = http_json(
         base_url,
@@ -55,13 +69,13 @@ def test_patch_url_updates_normalized_url_and_title_without_moving_groups(app):
     assert status == 200
     assert payload["url"]["url"] == "https://new.example"
     assert payload["url"]["title"] == "New title"
-    assert trellmark.read_url_group_ids(record["id"]) == [reading["id"]]
-    assert trellmark.read_url_record_by_id(record["id"]) == payload["url"]
+    assert url_group_ids(record["id"]) == [reading["id"]]
+    assert url_payload(record["id"]) == payload["url"]
 
 
 def test_patch_url_can_clear_title_without_changing_url(app):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Example")
+    record = seed_url("https://example.com", title="Example")
     assert record is not None
 
     status, payload = http_json(
@@ -78,8 +92,8 @@ def test_patch_url_can_clear_title_without_changing_url(app):
 
 def test_patch_url_rejects_duplicate_without_changing_record(app):
     base_url, _ = app
-    first = trellmark.add_url("https://one.example", title="One")
-    second = trellmark.add_url("https://two.example", title="Two")
+    first = seed_url("https://one.example", title="One")
+    second = seed_url("https://two.example", title="Two")
     assert first is not None
     assert second is not None
 
@@ -96,13 +110,13 @@ def test_patch_url_rejects_duplicate_without_changing_record(app):
 
     assert status == 409
     assert payload == {"error": "This URL is already saved."}
-    assert trellmark.read_url_record_by_id(second["id"]) == second
+    assert url_payload(second["id"]) == second
 
 
 @pytest.mark.parametrize("url", ["", "ftp://example.com", "not a url"])
 def test_patch_url_rejects_invalid_url(app, url):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com")
+    record = seed_url("https://example.com")
     assert record is not None
 
     status, payload = http_json(
@@ -114,7 +128,7 @@ def test_patch_url_rejects_invalid_url(app, url):
 
     assert status == 400
     assert "error" in payload
-    assert trellmark.read_url_record_by_id(record["id"]) == record
+    assert url_payload(record["id"]) == record
 
 
 def test_patch_missing_url_returns_not_found(app):
@@ -133,7 +147,7 @@ def test_patch_missing_url_returns_not_found(app):
 
 def test_patch_url_rejects_null_url_with_specific_error(app):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com")
+    record = seed_url("https://example.com")
     assert record is not None
 
     status, payload = http_json(
@@ -145,12 +159,12 @@ def test_patch_url_rejects_null_url_with_specific_error(app):
 
     assert status == 400
     assert payload == {"error": "Enter a URL."}
-    assert trellmark.read_url_record_by_id(record["id"]) == record
+    assert url_payload(record["id"]) == record
 
 
 def test_patch_url_rejects_stale_version_without_reverting_newer_change(app):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
 
     status, first_payload = http_json(
@@ -171,19 +185,24 @@ def test_patch_url_rejects_stale_version_without_reverting_newer_change(app):
 
     assert status == 409
     assert payload == {"error": "This URL was changed. Reload and try again."}
-    stored = trellmark.read_url_record_by_id(record["id"])
+    stored = url_payload(record["id"])
     assert stored is not None
     assert stored["url"] == "https://example.com"
     assert stored["title"] == "New title"
     assert stored["version"] == record["version"] + 1
 
 
-def test_patch_url_accepts_original_version_after_important_change(app):
+def test_patch_url_accepts_original_version_after_important_change(
+    app, bookmarks_service
+):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
-    updated = trellmark.set_url_important(record["id"], True)
-    assert updated is not None
+    outcome = run_async(
+        lambda: bookmarks_service.set_important(SetImportant(record["id"], True))
+    )
+    assert isinstance(outcome, SetImportantSucceeded)
+    updated = asdict(outcome.record)
     assert updated["version"] == record["version"]
 
     status, payload = http_json(
@@ -199,18 +218,16 @@ def test_patch_url_accepts_original_version_after_important_change(app):
     assert payload["url"]["version"] == record["version"] + 1
 
 
-def test_update_url_record_rejects_empty_fields(app):
-    record = trellmark.add_url("https://example.com")
+def test_edit_url_service_rejects_empty_fields(app, bookmarks_service):
+    record = seed_url("https://example.com")
     assert record is not None
 
-    with pytest.raises(ValueError, match="At least one URL field is required"):
-        trellmark.update_url_record(
-            record["id"],
-            expected_version=record["version"],
-            fields={},
-        )
+    outcome = run_async(
+        lambda: bookmarks_service.edit_url(EditURL(record["id"], record["version"]))
+    )
+    assert outcome == EmptyURLEdit(record["id"])
 
-    assert trellmark.read_url_record_by_id(record["id"]) == record
+    assert url_payload(record["id"]) == record
 
 
 @pytest.mark.parametrize(
@@ -220,7 +237,7 @@ def test_update_url_record_rejects_empty_fields(app):
 )
 def test_refresh_url_title_fetches_and_stores_new_title(app, title_fetcher):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
 
     status, payload = http_json(
@@ -234,7 +251,7 @@ def test_refresh_url_title_fetches_and_stores_new_title(app, title_fetcher):
     assert payload["title_updated"] is True
     assert payload["url"]["title"] == "Fresh title"
     assert payload["groups"][0]["urls"][0]["title"] == "Fresh title"
-    assert trellmark.read_url_record_by_id(record["id"])["title"] == "Fresh title"
+    assert url_payload(record["id"])["title"] == "Fresh title"
 
 
 @pytest.mark.parametrize(
@@ -247,7 +264,7 @@ def test_refresh_url_title_reports_failure_and_keeps_existing_title(
     title_fetcher,
 ):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Existing title")
+    record = seed_url("https://example.com", title="Existing title")
     assert record is not None
 
     status, payload = http_json(
@@ -259,24 +276,27 @@ def test_refresh_url_title_reports_failure_and_keeps_existing_title(
     assert status == 502
     assert payload == {"error": "Could not fetch a page title."}
     assert title_fetcher.calls == ["https://example.com"]
-    assert trellmark.read_url_record_by_id(record["id"])["title"] == "Existing title"
+    assert url_payload(record["id"])["title"] == "Existing title"
 
 
-def test_refresh_url_title_reports_no_title_without_treating_it_as_failure(app):
+@pytest.mark.parametrize("endpoint", ["refresh-title", "refresh-metadata"])
+def test_refresh_url_title_reports_no_title_without_treating_it_as_failure(
+    app, endpoint
+):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Existing title")
+    record = seed_url("https://example.com", title="Existing title")
     assert record is not None
 
     status, payload = http_json(
         base_url,
-        f"/api/urls/{record['id']}/refresh-title",
+        f"/api/urls/{record['id']}/{endpoint}",
         method="POST",
     )
 
     assert status == 200
     assert payload["title_updated"] is False
     assert payload["url"]["title"] == "Existing title"
-    assert trellmark.read_url_record_by_id(record["id"])["title"] == "Existing title"
+    assert url_payload(record["id"])["title"] == "Existing title"
 
 
 @pytest.mark.parametrize(
@@ -284,21 +304,25 @@ def test_refresh_url_title_reports_no_title_without_treating_it_as_failure(app):
     [ConcurrentEditTitleFetcher()],
     indirect=True,
 )
-def test_refresh_url_title_rejects_concurrent_edit(app, title_fetcher):
+@pytest.mark.parametrize("endpoint", ["refresh-title", "refresh-metadata"])
+def test_refresh_url_title_rejects_concurrent_edit(
+    app, title_fetcher, bookmarks_service, endpoint
+):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
     title_fetcher.url_id = record["id"]
+    title_fetcher.service = bookmarks_service
 
     status, payload = http_json(
         base_url,
-        f"/api/urls/{record['id']}/refresh-title",
+        f"/api/urls/{record['id']}/{endpoint}",
         method="POST",
     )
 
     assert status == 409
     assert payload == {"error": "This URL was changed. Reload and try again."}
-    stored = trellmark.read_url_record_by_id(record["id"])
+    stored = url_payload(record["id"])
     assert stored is not None
     assert stored["title"] == "Manual title"
     assert stored["version"] == record["version"] + 1
@@ -309,15 +333,19 @@ def test_refresh_url_title_rejects_concurrent_edit(app, title_fetcher):
     [ConcurrentImportantTitleFetcher()],
     indirect=True,
 )
-def test_refresh_url_title_allows_concurrent_important_change(app, title_fetcher):
+@pytest.mark.parametrize("endpoint", ["refresh-title", "refresh-metadata"])
+def test_refresh_url_title_allows_concurrent_important_change(
+    app, title_fetcher, bookmarks_service, endpoint
+):
     base_url, _ = app
-    record = trellmark.add_url("https://example.com", title="Old title")
+    record = seed_url("https://example.com", title="Old title")
     assert record is not None
     title_fetcher.url_id = record["id"]
+    title_fetcher.service = bookmarks_service
 
     status, payload = http_json(
         base_url,
-        f"/api/urls/{record['id']}/refresh-title",
+        f"/api/urls/{record['id']}/{endpoint}",
         method="POST",
     )
 
@@ -333,12 +361,15 @@ def test_refresh_url_title_allows_concurrent_important_change(app, title_fetcher
     [RecordingTitleFetcher("Should not fetch")],
     indirect=True,
 )
-def test_refresh_missing_url_returns_not_found_without_fetching(app, title_fetcher):
+@pytest.mark.parametrize("endpoint", ["refresh-title", "refresh-metadata"])
+def test_refresh_missing_url_returns_not_found_without_fetching(
+    app, title_fetcher, endpoint
+):
     base_url, _ = app
 
     status, payload = http_json(
         base_url,
-        "/api/urls/999/refresh-title",
+        f"/api/urls/999/{endpoint}",
         method="POST",
     )
 

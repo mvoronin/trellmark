@@ -1,6 +1,6 @@
 from playwright.sync_api import expect
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.helpers import child_names_in, group_in, stored_groups
 
 # Figure spaces, one indent per level below the root. Must match optionLabel()
@@ -28,15 +28,15 @@ def option_labels(select, expected_count):
 
 def test_frontend_renders_three_levels_in_tree_order_with_direct_counts(app, page):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
-    child = trellmark.add_group("Child", parent_id=parent["id"])
-    grandchild = trellmark.add_group("Grandchild", parent_id=child["id"])
+    parent = bookmark_helpers.seed_group("Parent")
+    child = bookmark_helpers.seed_group("Child", parent_id=parent["id"])
+    grandchild = bookmark_helpers.seed_group("Grandchild", parent_id=child["id"])
 
-    trellmark.add_url("https://default.example")
-    child_url = trellmark.add_url("https://child.example")
-    trellmark.move_url_to_group(child_url["id"], child["id"])
-    grandchild_url = trellmark.add_url("https://grandchild.example")
-    trellmark.move_url_to_group(grandchild_url["id"], grandchild["id"])
+    bookmark_helpers.seed_url("https://default.example")
+    child_url = bookmark_helpers.seed_url("https://child.example")
+    bookmark_helpers.seed_membership(child_url["id"], child["id"])
+    grandchild_url = bookmark_helpers.seed_url("https://grandchild.example")
+    bookmark_helpers.seed_membership(grandchild_url["id"], grandchild["id"])
 
     page.goto(base_url)
 
@@ -67,10 +67,10 @@ def test_frontend_renders_three_levels_in_tree_order_with_direct_counts(app, pag
 
 def test_frontend_parent_fold_hides_subtree_and_preserves_child_fold(app, page):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
-    child = trellmark.add_group("Child", parent_id=parent["id"])
-    saved = trellmark.add_url("https://child.example")
-    trellmark.move_url_to_group(saved["id"], child["id"])
+    parent = bookmark_helpers.seed_group("Parent")
+    child = bookmark_helpers.seed_group("Child", parent_id=parent["id"])
+    saved = bookmark_helpers.seed_url("https://child.example")
+    bookmark_helpers.seed_membership(saved["id"], child["id"])
 
     page.goto(base_url)
     page.get_by_role("button", name="Toggle Child").click()
@@ -95,10 +95,12 @@ def test_frontend_parent_fold_hides_subtree_and_preserves_child_fold(app, page):
 
 def test_frontend_safe_filter_hides_an_nsfw_groups_safe_descendants(app, page):
     base_url, _ = app
-    visible = trellmark.add_group("Visible", domains=["shared.example"])
-    private = trellmark.add_group("Private", nsfw=True, domains=["shared.example"])
-    trellmark.add_group("Safe child", parent_id=private["id"])
-    saved = trellmark.add_url("https://shared.example/article")
+    visible = bookmark_helpers.seed_group("Visible", domains=["shared.example"])
+    private = bookmark_helpers.seed_group(
+        "Private", nsfw=True, domains=["shared.example"]
+    )
+    bookmark_helpers.seed_group("Safe child", parent_id=private["id"])
+    saved = bookmark_helpers.seed_url("https://shared.example/article")
 
     page.goto(base_url)
 
@@ -106,7 +108,7 @@ def test_frontend_safe_filter_hides_an_nsfw_groups_safe_descendants(app, page):
     expect(header_for(page, "Safe child")).to_have_count(0)
     expect(page.get_by_role("link", name="shared.example/article")).to_have_count(1)
     expect(page.locator("#url-count")).to_have_text("1 saved")
-    assert visible["id"] in trellmark.read_url_group_ids(saved["id"])
+    assert visible["id"] in bookmark_helpers.url_group_ids(saved["id"])
 
     page.get_by_role("button", name="All", exact=True).click()
     expect(header_for(page, "Private")).to_be_visible()
@@ -117,10 +119,10 @@ def test_frontend_safe_filter_hides_an_nsfw_groups_safe_descendants(app, page):
 
 def test_frontend_parent_selects_create_and_reparent_groups(app, page):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
-    child = trellmark.add_group("Child", parent_id=parent["id"])
-    grandchild = trellmark.add_group("Grandchild", parent_id=child["id"])
-    other = trellmark.add_group("Other")
+    parent = bookmark_helpers.seed_group("Parent")
+    child = bookmark_helpers.seed_group("Child", parent_id=parent["id"])
+    grandchild = bookmark_helpers.seed_group("Grandchild", parent_id=child["id"])
+    other = bookmark_helpers.seed_group("Other")
 
     page.goto(base_url)
 
@@ -161,7 +163,7 @@ def test_frontend_create_parent_select_falls_back_to_root_when_choice_is_deleted
     app, page
 ):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
+    parent = bookmark_helpers.seed_group("Parent")
 
     page.goto(base_url)
     create_parent = page.locator("#group-parent")

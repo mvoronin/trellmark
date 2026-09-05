@@ -26,7 +26,11 @@ def run_migrations_offline():
 def run_migrations_online():
     # The DSN comes from trellmark.config, not from alembic.ini, so a password
     # never has to be written into a tracked file or escaped for ConfigParser.
-    connectable = create_engine(database_url(), poolclass=pool.NullPool)
+    connectable = create_engine(
+        database_url(),
+        poolclass=pool.NullPool,
+        hide_parameters=True,
+    )
 
     with connectable.connect() as connection:
         context.configure(

@@ -68,6 +68,88 @@ def test_deploy_tree_contains_no_private_caddy_or_second_application_image():
     assert "caddy run" not in containerfile
 
 
+def test_container_command_runs_the_explicit_cli_with_frozen_startup_options(
+    monkeypatch,
+):
+    import json
+
+    from trellmark import cli
+    from trellmark.identity import persistence
+    from trellmark.platform import runtime
+
+    assert cli.verify_db_at_head is runtime.verify_db_at_head
+    assert cli.verify_seeded_identity is persistence.verify_seeded_identity
+    command = next(
+        json.loads(line.removeprefix("CMD "))
+        for line in CONTAINERFILE.read_text().splitlines()
+        if line.startswith("CMD ")
+    )
+    assert command == ["python", "server.py", "--host", "0.0.0.0", "--port", "8000"]
+    events = []
+    application = object()
+    monkeypatch.setattr(cli, "public_origin", lambda: events.append("origin"))
+    monkeypatch.setattr(cli, "verify_db_at_head", lambda: events.append("schema"))
+    monkeypatch.setattr(
+        cli, "verify_seeded_identity", lambda: events.append("identity")
+    )
+
+    def construct():
+        events.append("construct")
+        return application
+
+    def serve(app, **options):
+        assert app is application
+        assert options == {
+            "host": "0.0.0.0",
+            "port": 8000,
+            "proxy_headers": True,
+            "forwarded_allow_ips": "127.0.0.1,::1",
+        }
+        events.append("serve")
+
+    monkeypatch.setattr(cli, "create_app", construct)
+    monkeypatch.setattr(cli.uvicorn, "run", serve)
+    cli.main(command[2:])
+    assert events == ["origin", "schema", "identity", "construct", "serve"]
+
+
+@pytest.mark.parametrize("operation", ["migrate", "revision", "verify-identity"])
+def test_maintenance_commands_dispatch_to_explicit_platform_and_identity_owners(
+    monkeypatch, operation
+):
+    from trellmark import cli
+    from trellmark.identity import persistence
+    from trellmark.platform import runtime
+
+    assert cli.run_migrations is runtime.run_migrations
+    assert cli.alembic_config is runtime.alembic_config
+    assert cli.verify_db_at_head is runtime.verify_db_at_head
+    assert cli.verify_seeded_identity is persistence.verify_seeded_identity
+    assert cli.set_administrator_password is persistence.set_administrator_password
+    events = []
+    configuration = runtime.alembic_config()
+    monkeypatch.setattr(cli, "run_migrations", lambda: events.append("migrate"))
+    monkeypatch.setattr(cli, "alembic_config", lambda: configuration)
+    monkeypatch.setattr(cli, "verify_db_at_head", lambda: events.append("schema"))
+    monkeypatch.setattr(
+        cli, "verify_seeded_identity", lambda: events.append("identity")
+    )
+
+    def revision(config, *, message):
+        assert config is configuration
+        assert message == "synthetic revision"
+        events.append("revision")
+
+    monkeypatch.setattr(cli.command, "revision", revision)
+    arguments = [operation]
+    if operation == "revision":
+        arguments.extend(["--message", "synthetic revision"])
+    cli.main(arguments)
+    assert events == (
+        ["schema", "identity"] if operation == "verify-identity" else [operation]
+    )
+
+
 def test_image_carries_no_database_storage_or_embedded_credentials():
     containerfile = CONTAINERFILE.read_text()
 

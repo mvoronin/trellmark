@@ -17,6 +17,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "basedpyright>=1.39.9",
+    "import-linter==2.14",
     "playwright>=1.52",
     "pytest>=8.0",
     "ruff>=0.11",
@@ -38,3 +39,114 @@ extend-exclude = [".codex"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.importlinter]
+root_package = "trellmark"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "bookmarks inward layers"
+type = "layers"
+containers = ["trellmark.bookmarks"]
+layers = ["api : persistence : integrations : backup", "application", "domain"]
+exhaustive = true
+
+[[tool.importlinter.contracts]]
+name = "backup inward layers"
+type = "layers"
+containers = ["trellmark.backup"]
+layers = ["api : persistence", "application", "domain"]
+exhaustive = true
+
+[[tool.importlinter.contracts]]
+name = "identity inward layers"
+type = "layers"
+containers = ["trellmark.identity"]
+layers = ["boundary : api : persistence : routes", "application", "domain"]
+exhaustive = true
+
+[[tool.importlinter.contracts]]
+name = "Framework-free feature cores"
+type = "forbidden"
+source_modules = [
+    "trellmark.bookmarks.domain", "trellmark.bookmarks.application",
+    "trellmark.backup.domain", "trellmark.backup.application",
+    "trellmark.identity.domain", "trellmark.identity.application",
+]
+forbidden_modules = [
+    "fastapi", "starlette", "pydantic", "sqlalchemy", "psycopg", "aiohttp",
+]
+
+[[tool.importlinter.contracts]]
+name = "Product-neutral platform"
+type = "forbidden"
+source_modules = ["trellmark.platform"]
+forbidden_modules = ["trellmark.bookmarks", "trellmark.backup", "trellmark.identity"]
+
+[[tool.importlinter.contracts]]
+name = "No broad package facade imports"
+type = "forbidden"
+source_modules = ["trellmark.**"]
+forbidden_modules = ["trellmark"]
+# Match __init__ itself, not the explicit feature modules below the package.
+as_packages = false
+
+[[tool.importlinter.contracts]]
+name = "No legacy module imports"
+type = "forbidden"
+source_modules = ["trellmark", "trellmark.**"]
+as_packages = false
+forbidden_modules = [
+    "trellmark.handlers", "trellmark.storage", "trellmark.models",
+    "trellmark.storage_types", "trellmark.app_keys", "trellmark.page_titles",
+    "trellmark.site_icons", "trellmark.responses", "trellmark.url_normalization",
+    "trellmark.title_text", "trellmark.identity.repository", "trellmark.identity.policy",
+]
+
+[[tool.importlinter.contracts]]
+name = "Bookmarks feature independence"
+type = "forbidden"
+source_modules = ["trellmark.bookmarks"]
+forbidden_modules = ["trellmark.backup", "trellmark.identity"]
+
+[[tool.importlinter.contracts]]
+name = "Identity feature independence"
+type = "forbidden"
+source_modules = ["trellmark.identity"]
+forbidden_modules = ["trellmark.bookmarks", "trellmark.backup"]
+
+[[tool.importlinter.contracts]]
+name = "Backup excludes Identity"
+type = "forbidden"
+source_modules = ["trellmark.backup"]
+forbidden_modules = ["trellmark.identity"]
+
+[[tool.importlinter.contracts]]
+name = "Backup narrow surface"
+type = "protected"
+protected_modules = ["trellmark.bookmarks.application", "trellmark.bookmarks.integrations"]
+allowed_importers = [
+    "trellmark.bookmarks", "trellmark.bookmarks.api",
+    "trellmark.bookmarks.integrations", "trellmark.app",
+]
+# Exact importer modules preserve the shared HTTP contract without granting
+# Backup direct access to Bookmark services or outbound integrations.
+as_packages = false
+
+[[tool.importlinter.contracts]]
+name = "Protected Backup contributor"
+type = "protected"
+protected_modules = ["trellmark.bookmarks.backup"]
+allowed_importers = ["trellmark.backup.persistence", "trellmark.app"]
+
+[[tool.importlinter.contracts]]
+name = "Protected Bookmark persistence"
+type = "protected"
+protected_modules = ["trellmark.bookmarks.persistence"]
+allowed_importers = ["trellmark.bookmarks.backup", "trellmark.backup.persistence", "trellmark.app"]
+
+[[tool.importlinter.contracts]]
+name = "Protected Bookmark API"
+type = "protected"
+protected_modules = ["trellmark.bookmarks.api"]
+allowed_importers = ["trellmark.backup.api", "trellmark.app"]

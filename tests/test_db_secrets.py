@@ -63,6 +63,8 @@ def run_db_secrets(tmp_path):
             timeout=60,
         )
         assert result.returncode == 0, result.stderr
+        assert password not in result.stdout
+        assert password not in result.stderr
         return {
             path.name: path.read_text()
             for path in secret_dir.iterdir()
@@ -90,6 +92,7 @@ def run_db_secrets(tmp_path):
 def test_db_secrets_dsn_round_trips_the_password(run_db_secrets, password):
     secrets = run_db_secrets(password)
 
+    assert set(secrets) == {"trellmark-db-password", "trellmark-database-url"}
     assert secrets["trellmark-db-password"] == password
 
     url = make_url(secrets["trellmark-database-url"])

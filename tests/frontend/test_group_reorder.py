@@ -2,7 +2,7 @@ import json
 
 from playwright.sync_api import expect
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 from tests.postgres import TEST_LOGIN, TEST_PASSWORD
 
 
@@ -74,10 +74,10 @@ def touch_drag(page, source, target, y_fraction=0.15):
 
 def test_frontend_reorders_groups_by_drag(app, page):
     base_url, _ = app
-    reading = trellmark.add_group("Reading")
-    trellmark.add_group("Work")
-    pinned = trellmark.add_url("https://one.example")
-    trellmark.move_url_to_group(pinned["id"], reading["id"])
+    reading = bookmark_helpers.seed_group("Reading")
+    bookmark_helpers.seed_group("Work")
+    pinned = bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_membership(pinned["id"], reading["id"])
 
     page.goto(base_url)
     expect(page.locator(".group-name")).to_have_text(["default", "Reading", "Work"])
@@ -95,7 +95,7 @@ def test_frontend_reorders_groups_by_drag(app, page):
 
     page.reload()
     expect(page.locator(".group-name")).to_have_text(["Work", "default", "Reading"])
-    assert [group["name"] for group in trellmark.read_group_records()] == [
+    assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
         "Work",
         "default",
         "Reading",
@@ -104,8 +104,8 @@ def test_frontend_reorders_groups_by_drag(app, page):
 
 def test_frontend_reorders_groups_by_touch(app, browser):
     base_url, _ = app
-    trellmark.add_group("Reading")
-    trellmark.add_group("Work")
+    bookmark_helpers.seed_group("Reading")
+    bookmark_helpers.seed_group("Work")
 
     context = browser.new_context(has_touch=True)
     try:
@@ -120,7 +120,7 @@ def test_frontend_reorders_groups_by_touch(app, browser):
 
         expect(page.locator("#form-status")).to_have_text("Reordered.")
         expect(page.locator(".group-name")).to_have_text(["Work", "default", "Reading"])
-        assert [group["name"] for group in trellmark.read_group_records()] == [
+        assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
             "Work",
             "default",
             "Reading",
@@ -131,7 +131,7 @@ def test_frontend_reorders_groups_by_touch(app, browser):
 
 def test_frontend_reorder_error_reloads_server_order(app, page):
     base_url, _ = app
-    trellmark.add_group("Reading")
+    bookmark_helpers.seed_group("Reading")
 
     page.goto(base_url)
     page.route(
@@ -148,7 +148,7 @@ def test_frontend_reorder_error_reloads_server_order(app, page):
     expect(page.locator("#form-status")).to_have_text("Invalid group order.")
     # The rejected move is dropped and the server's order is shown.
     expect(page.locator(".group-name")).to_have_text(["default", "Reading"])
-    assert [group["name"] for group in trellmark.read_group_records()] == [
+    assert [group["name"] for group in bookmark_helpers.group_payloads()] == [
         "default",
         "Reading",
     ]
@@ -156,10 +156,10 @@ def test_frontend_reorder_error_reloads_server_order(app, page):
 
 def test_frontend_reorders_only_within_the_dragged_groups_parent(app, page):
     base_url, _ = app
-    parent = trellmark.add_group("Parent")
-    first = trellmark.add_group("First", parent_id=parent["id"])
-    second = trellmark.add_group("Second", parent_id=parent["id"])
-    trellmark.add_group("Other")
+    parent = bookmark_helpers.seed_group("Parent")
+    first = bookmark_helpers.seed_group("First", parent_id=parent["id"])
+    second = bookmark_helpers.seed_group("Second", parent_id=parent["id"])
+    bookmark_helpers.seed_group("Other")
 
     requests = []
     page.on(

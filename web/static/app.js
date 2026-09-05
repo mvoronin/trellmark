@@ -146,6 +146,7 @@ function formatAdded(createdAt) {
 let groups = [];
 let groupFilter = "safe";
 let initialGroupsLoad = Promise.resolve();
+let privateStateSerial = 0;
 let pendingImportFile = null;
 let pendingImportRetryable = false;
 let importRequestInFlight = false;
@@ -691,10 +692,15 @@ importInput.addEventListener("change", () => {
 });
 importRetryButton.addEventListener("click", retryPendingImport);
 async function loadGroups() {
+    const requestSerial = privateStateSerial;
     const data = await apiListGroups();
+    if (requestSerial !== privateStateSerial) {
+        return;
+    }
     renderGroups(data.groups);
 }
 function clearPrivateState() {
+    privateStateSerial += 1;
     groups = [];
     importRequestSerial += 1;
     importRequestInFlight = false;

@@ -2,6 +2,7 @@
 .idea/
 .codex/
 gsd-local-patches/
+.planning/research/.cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/

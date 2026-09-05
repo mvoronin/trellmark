@@ -3,7 +3,7 @@ themes, and no horizontal overflow on a narrow phone."""
 
 import pytest
 
-import trellmark
+from tests.bookmarks import helpers as bookmark_helpers
 
 # Reads every distinct text style on the page, resolves its color against the
 # nearest painted ancestor background, and returns the WCAG ratio.
@@ -68,21 +68,23 @@ CONTRAST_JS = """
 def _seed():
     """A page with every styled surface on it: a filled band, an important row,
     an NSFW badge, an empty group, and a long unbreakable URL."""
-    reading = trellmark.add_group("Reading", domains=["arxiv.org"])
-    trellmark.add_group("Archive")
-    adult = trellmark.add_group("Adult", nsfw=True)
+    reading = bookmark_helpers.seed_group("Reading", domains=["arxiv.org"])
+    bookmark_helpers.seed_group("Archive")
+    adult = bookmark_helpers.seed_group("Adult", nsfw=True)
 
-    starred = trellmark.add_url("https://example.com/a-fairly-long-article-title")
-    trellmark.update_url_title(starred["id"], "Constructivism and the Grid")
-    trellmark.set_url_important(starred["id"], True)
+    starred = bookmark_helpers.seed_url(
+        "https://example.com/a-fairly-long-article-title"
+    )
+    bookmark_helpers.seed_title(starred["id"], "Constructivism and the Grid")
+    bookmark_helpers.seed_important(starred["id"], True)
 
-    filed = trellmark.add_url("https://arxiv.org/abs/2401.00001")
-    trellmark.move_url_to_group(filed["id"], reading["id"])
+    filed = bookmark_helpers.seed_url("https://arxiv.org/abs/2401.00001")
+    bookmark_helpers.seed_membership(filed["id"], reading["id"])
 
-    hidden = trellmark.add_url("https://adult.example/gallery")
-    trellmark.move_url_to_group(hidden["id"], adult["id"])
+    hidden = bookmark_helpers.seed_url("https://adult.example/gallery")
+    bookmark_helpers.seed_membership(hidden["id"], adult["id"])
 
-    trellmark.add_url("https://very-long-domain-name.example.net/deep/path/x")
+    bookmark_helpers.seed_url("https://very-long-domain-name.example.net/deep/path/x")
 
 
 def _measure(page, base_url, theme, width):

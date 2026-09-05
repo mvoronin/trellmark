@@ -7,11 +7,12 @@ import pytest
 import uvicorn
 
 import trellmark
+from tests.bookmarks.helpers import make_icon_service
 from tests.helpers import clear_authentication
 from tests.postgres import reset_database, start_server
 from trellmark import config
 from trellmark.cli import FORWARDED_ALLOW_IPS
-from trellmark.site_icons import SiteIconService
+from trellmark.platform import runtime
 
 
 async def _no_title_fetcher(url):
@@ -41,9 +42,9 @@ def migrated_database(postgres_server):
     original = config.DATABASE_URL
     config.DATABASE_URL = url.render_as_string(hide_password=False)
     try:
-        trellmark.run_migrations()
+        runtime.run_migrations()
     finally:
-        trellmark.dispose_engine()
+        runtime.dispose_engine()
         config.DATABASE_URL = original
 
     yield url
@@ -58,9 +59,9 @@ def database(migrated_database, monkeypatch):
     monkeypatch.setattr(
         config, "DATABASE_URL", migrated_database.render_as_string(hide_password=False)
     )
-    trellmark.dispose_engine()
+    runtime.dispose_engine()
     yield migrated_database
-    trellmark.dispose_engine()
+    runtime.dispose_engine()
 
 
 @pytest.fixture
@@ -74,9 +75,9 @@ def empty_database(postgres_server, monkeypatch):
     monkeypatch.setattr(
         config, "DATABASE_URL", url.render_as_string(hide_password=False)
     )
-    trellmark.dispose_engine()
+    runtime.dispose_engine()
     yield url
-    trellmark.dispose_engine()
+    runtime.dispose_engine()
     postgres_server.drop_database(url)
 
 
@@ -89,12 +90,19 @@ def title_fetcher(request):
 def icon_service(request):
     configured = getattr(request, "param", None)
     if configured is None:
-        return SiteIconService(fetcher=_no_icon_fetcher)
+        return make_icon_service(fetcher=_no_icon_fetcher)
     return configured() if callable(configured) else configured
 
 
 @pytest.fixture
-def app(database, title_fetcher, icon_service, monkeypatch):
+def backup_uow_factory():
+    from tests.backup.helpers import ObservedBackupFactory
+
+    return ObservedBackupFactory()
+
+
+@pytest.fixture
+def app(database, title_fetcher, icon_service, backup_uow_factory, monkeypatch):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
@@ -104,6 +112,7 @@ def app(database, title_fetcher, icon_service, monkeypatch):
     application = trellmark.create_app(
         title_fetcher=title_fetcher,
         icon_service=icon_service,
+        backup_uow_factory=backup_uow_factory,
     )
     server = uvicorn.Server(
         uvicorn.Config(

@@ -1,13 +1,13 @@
-import base64
 import hashlib
 import hmac
-import math
 import secrets
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from types import TracebackType
+from typing import assert_never, cast
 
-from argon2 import extract_parameters
+from argon2 import PasswordHasher, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError
 from argon2.low_level import Type
 from sqlalchemy import (
@@ -33,22 +33,22 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.engine import Connection, RowMapping
+from sqlalchemy.engine import Connection, Engine, RowMapping, Transaction
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..storage import get_engine
-from .policy import (
-    ADMIN_PASSWORD_MAX_BYTES,
-    ADMIN_PASSWORD_MIN_BYTES,
+from ..platform.runtime import get_engine, read_connection
+from .application import (
+    authenticate_session_with_ports,
+    login_in_uow,
+    revoke_session_in_uow,
+    rotate_password_in_uow,
+)
+from .domain import (
     CSRF_SECRET_BYTES,
-    DUMMY_PASSWORD_HASH,
     GLOBAL_BLOCK_LIFETIME,
     GLOBAL_BUCKET_KEY,
     GLOBAL_FAILURE_LIMIT,
-    MAX_RETRY_AFTER_SECONDS,
-    MAX_SOURCE_KEY_LENGTH,
     PASSWORD_HASH_BYTES,
-    PASSWORD_HASHER,
     PASSWORD_MEMORY_KIB,
     PASSWORD_PARALLELISM,
     PASSWORD_SALT_BYTES,
@@ -62,6 +62,45 @@ from .policy import (
     SOURCE_FAILURE_LIMIT,
     THROTTLE_PRUNE_LIMIT,
     THROTTLE_WINDOW,
+    AuthSession,
+    IdentityCleaned,
+    LoginCommand,
+    LoginCreated,
+    LoginFailureRecorded,
+    LoginOutcome,
+    LoginThrottled,
+    PasswordRotated,
+    RevokeSessionCommand,
+    RotatePasswordCommand,
+    SeededIdentityInvalid,
+    SeededIdentityOutcome,
+    SeededIdentityValid,
+    SessionAuthenticated,
+    SessionCommand,
+    SessionMissing,
+    SessionOutcome,
+    SessionRevoked,
+    decode_session_secrets,
+    retry_after_seconds,
+    throttle_window_expired,
+    urlsafe_encode,
+)
+
+PASSWORD_HASHER = PasswordHasher(
+    time_cost=PASSWORD_TIME_COST,
+    memory_cost=PASSWORD_MEMORY_KIB,
+    parallelism=PASSWORD_PARALLELISM,
+    hash_len=PASSWORD_HASH_BYTES,
+    salt_len=PASSWORD_SALT_BYTES,
+    type=Type.ID,
+)
+
+# A normal Argon2id verifier used only to equalize syntactically valid unknown
+# logins. Its input has no authentication meaning and grants no access.
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=19456,t=2,p=1$"
+    "/NugjqiIU8py8h7Kcv6dlw$"
+    "9TlyDzyIYzAEWKLYHTm4IwspVxK5I1zBnamce16nuyQ"
 )
 
 metadata = MetaData()
@@ -157,14 +196,6 @@ Index(
 )
 
 
-@dataclass(frozen=True)
-class AuthSession:
-    id: int
-    user_id: int
-    login: str
-    csrf_token: str
-
-
 class LoginRejected(Exception):
     pass
 
@@ -175,44 +206,210 @@ class LoginBlocked(Exception):
         self.retry_after = retry_after
 
 
-@dataclass(frozen=True)
-class _LoginCreated:
-    session: AuthSession
-    cookie_value: str
+type EngineFactory = Callable[[], Engine]
 
 
-@dataclass(frozen=True)
-class _LoginBlocked:
-    retry_after: int
+@dataclass(frozen=True, slots=True)
+class PostgresIdentityRepository:
+    connection: Connection
+
+    def login(self, command: LoginCommand) -> LoginOutcome:
+        return _attempt_login(
+            self.connection,
+            source_key=command.source,
+            login=command.login,
+            password=command.password,
+        )
+
+    def authenticate_session(self, command: SessionCommand) -> SessionOutcome:
+        return _authenticate_session_on(self.connection, command)
+
+    def rotate_password(self, command: RotatePasswordCommand) -> PasswordRotated:
+        return _rotate_password_on(self.connection, command)
+
+    def revoke_session(self, command: RevokeSessionCommand) -> SessionRevoked:
+        self.connection.execute(
+            update(web_sessions_table)
+            .where(
+                web_sessions_table.c.id == command.session_id,
+                web_sessions_table.c.revoked_at.is_(None),
+            )
+            .values(revoked_at=_utc_now())
+        )
+        return SessionRevoked()
+
+    def cleanup(self) -> IdentityCleaned:
+        now = _utc_now()
+        _prune_throttles(self.connection, now)
+        _prune_sessions(self.connection, now)
+        return IdentityCleaned()
 
 
-@dataclass(frozen=True)
-class _LoginRejected:
-    pass
+@dataclass(slots=True)
+class PostgresIdentityUnitOfWork:
+    engine_factory: EngineFactory
+    identity: PostgresIdentityRepository = field(init=False)
+    _connection: Connection | None = field(init=False, default=None)
+    _transaction: Transaction | None = field(init=False, default=None)
+
+    def __enter__(self) -> "PostgresIdentityUnitOfWork":
+        if self._connection is not None:
+            raise RuntimeError("Identity unit of work is already active.")
+        connection = self.engine_factory().connect()
+        self._connection = connection
+        try:
+            self._transaction = connection.begin()
+            self.identity = PostgresIdentityRepository(connection)
+            return self
+        except BaseException:
+            try:
+                connection.close()
+            except BaseException:
+                # Preserve the failed begin/bind operation; cleanup is still
+                # attempted and may fail during the same connection outage.
+                pass
+            finally:
+                self._connection = None
+                self._transaction = None
+            raise
+
+    def commit(self) -> None:
+        transaction = self._transaction
+        if transaction is None or not transaction.is_active:
+            raise RuntimeError("Identity unit of work is not active.")
+        transaction.commit()
+
+    def __exit__(
+        self,
+        _exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self._close()
+        except BaseException:
+            # A cleanup error must never replace the operation/commit error
+            # being carried back through the worker to the safe HTTP boundary.
+            if exception is None:
+                raise
+
+    def _close(self) -> None:
+        connection = self._connection
+        transaction = self._transaction
+        try:
+            if transaction is not None and transaction.is_active:
+                transaction.rollback()
+        finally:
+            try:
+                if connection is not None:
+                    connection.close()
+            finally:
+                self._connection = None
+                self._transaction = None
 
 
-type _LoginResult = _LoginCreated | _LoginBlocked | _LoginRejected
+@dataclass(frozen=True, slots=True)
+class PostgresIdentityUnitOfWorkFactory:
+    engine_factory: EngineFactory
+
+    def __call__(self) -> PostgresIdentityUnitOfWork:
+        return PostgresIdentityUnitOfWork(self.engine_factory)
 
 
+@dataclass(frozen=True, slots=True)
+class PostgresIdentityQueries:
+    engine_factory: EngineFactory
+
+    def lookup_session(self, cookie_value: str | None) -> SessionOutcome:
+        with read_connection(self.engine_factory()) as connection:
+            return _authenticate_session_on(
+                connection, SessionCommand(cookie_value, touch=False)
+            )
+
+    def seeded_identity(self) -> SeededIdentityOutcome:
+        with read_connection(self.engine_factory()) as connection:
+            return _seeded_identity_on(connection)
+
+    def database_ready(self) -> bool:
+        with read_connection(self.engine_factory()) as connection:
+            connection.execute(select(1)).scalar_one()
+        return True
+
+
+# Synchronous compatibility adapters for transport/CLI migrations in Plans
+# 02-13, 02-20, and 02-14. They share application transaction decisions; all
+# async service calls use the injected bounded runner.
 def create_login_session(
     source: str, login: str, password: str
 ) -> tuple[AuthSession, str]:
-    """Verify one password attempt and atomically persist its policy outcome."""
-    normalized_login = login.strip().lower()
-    source_key = _bounded_source_key(source)
-    with get_engine().begin() as connection:
-        result = _attempt_login(
-            connection,
-            source_key=source_key,
-            login=normalized_login,
-            password=password,
-        )
+    outcome = login_in_uow(
+        PostgresIdentityUnitOfWorkFactory(get_engine),
+        LoginCommand(source, login, password),
+    )
+    match outcome:
+        case LoginCreated(session, cookie_value):
+            return session, cookie_value
+        case LoginFailureRecorded():
+            raise LoginRejected
+        case LoginThrottled(retry_after):
+            raise LoginBlocked(retry_after)
+    assert_never(outcome)
 
-    if isinstance(result, _LoginBlocked):
-        raise LoginBlocked(result.retry_after)
-    if isinstance(result, _LoginRejected):
-        raise LoginRejected
-    return result.session, result.cookie_value
+
+def authenticate_session(
+    cookie_value: str | None, *, touch: bool = True
+) -> AuthSession | None:
+    outcome = authenticate_session_with_ports(
+        PostgresIdentityUnitOfWorkFactory(get_engine),
+        PostgresIdentityQueries(get_engine),
+        SessionCommand(cookie_value, touch=touch),
+    )
+    match outcome:
+        case SessionAuthenticated(session):
+            return session
+        case SessionMissing():
+            return None
+    assert_never(outcome)
+
+
+def revoke_session(session: AuthSession) -> None:
+    revoke_session_in_uow(
+        PostgresIdentityUnitOfWorkFactory(get_engine), RevokeSessionCommand(session.id)
+    )
+
+
+def set_administrator_password(password: str) -> int:
+    command = RotatePasswordCommand(password)
+    try:
+        return rotate_password_in_uow(
+            PostgresIdentityUnitOfWorkFactory(get_engine), command
+        ).revoked_sessions
+    except SQLAlchemyError as error:
+        raise RuntimeError("Could not update the administrator credential.") from error
+
+
+def verify_seeded_identity() -> None:
+    try:
+        outcome = PostgresIdentityQueries(get_engine).seeded_identity()
+    except SQLAlchemyError as error:
+        raise RuntimeError(
+            "The seeded administrator credential is unavailable."
+        ) from error
+    match outcome:
+        case SeededIdentityValid():
+            return
+        case SeededIdentityInvalid():
+            raise RuntimeError(
+                "The seeded administrator credential is missing or invalid."
+            )
+    assert_never(outcome)
+
+
+def database_ready() -> bool:
+    try:
+        return PostgresIdentityQueries(get_engine).database_ready()
+    except SQLAlchemyError:
+        return False
 
 
 def _attempt_login(
@@ -221,7 +418,7 @@ def _attempt_login(
     source_key: str,
     login: str,
     password: str,
-) -> _LoginResult:
+) -> LoginOutcome:
     now = _utc_now()
     _prune_throttles(connection, now)
     _ensure_throttle_bucket(connection, "global", GLOBAL_BUCKET_KEY, now)
@@ -231,14 +428,14 @@ def _attempt_login(
     global_bucket = _refresh_bucket(connection, global_bucket, now)
     retry_after = _active_retry_after(global_bucket, now)
     if retry_after is not None:
-        return _LoginBlocked(retry_after)
+        return LoginThrottled(retry_after)
 
     _ensure_throttle_bucket(connection, "source", source_key, now)
     source_bucket = _lock_bucket(connection, "source", source_key)
     source_bucket = _refresh_bucket(connection, source_bucket, now)
     retry_after = _active_retry_after(source_bucket, now)
     if retry_after is not None:
-        return _LoginBlocked(retry_after)
+        return LoginThrottled(retry_after)
 
     credential = (
         connection.execute(
@@ -297,7 +494,7 @@ def _attempt_login(
             SOURCE_FAILURE_LIMIT,
             SOURCE_BLOCK_LIFETIME,
         )
-        return _LoginRejected()
+        return LoginFailureRecorded()
 
     user_id = cast(int, credential["id"])
     if PASSWORD_HASHER.check_needs_rehash(password_hash):
@@ -335,181 +532,131 @@ def _attempt_login(
         login=cast(str, credential["username"]),
         csrf_token=csrf_token,
     )
-    return _LoginCreated(session=session, cookie_value=cookie_value)
+    return LoginCreated(session=session, cookie_value=cookie_value)
 
 
-def authenticate_session(
-    cookie_value: str | None, *, touch: bool = True
-) -> AuthSession | None:
-    decoded = _decode_session_secrets(cookie_value)
+def _authenticate_session_on(
+    connection: Connection, command: SessionCommand
+) -> SessionOutcome:
+    decoded = decode_session_secrets(command.cookie_value)
     if decoded is None:
-        return None
+        return SessionMissing()
     session_hash, csrf_hash, csrf_token = decoded
 
-    with get_engine().begin() as connection:
-        now = _utc_now()
-        row = (
-            connection.execute(
-                select(
-                    web_sessions_table.c.id,
-                    web_sessions_table.c.user_id,
-                    web_sessions_table.c.csrf_secret_hash,
-                    web_sessions_table.c.last_used_at,
-                    web_sessions_table.c.absolute_expires_at,
-                    users_table.c.username,
-                )
-                .select_from(
-                    web_sessions_table.join(
-                        users_table, users_table.c.id == web_sessions_table.c.user_id
-                    )
-                )
-                .where(
-                    web_sessions_table.c.secret_hash == session_hash,
-                    web_sessions_table.c.revoked_at.is_(None),
-                    web_sessions_table.c.idle_expires_at > now,
-                    web_sessions_table.c.absolute_expires_at > now,
-                    users_table.c.status == "active",
-                    users_table.c.role == "admin",
+    now = _utc_now()
+    row = (
+        connection.execute(
+            select(
+                web_sessions_table.c.id,
+                web_sessions_table.c.user_id,
+                web_sessions_table.c.csrf_secret_hash,
+                web_sessions_table.c.last_used_at,
+                web_sessions_table.c.absolute_expires_at,
+                users_table.c.username,
+            )
+            .select_from(
+                web_sessions_table.join(
+                    users_table, users_table.c.id == web_sessions_table.c.user_id
                 )
             )
-            .mappings()
-            .one_or_none()
+            .where(
+                web_sessions_table.c.secret_hash == session_hash,
+                web_sessions_table.c.revoked_at.is_(None),
+                web_sessions_table.c.idle_expires_at > now,
+                web_sessions_table.c.absolute_expires_at > now,
+                users_table.c.status == "active",
+                users_table.c.role == "admin",
+            )
         )
-        if row is None or not hmac.compare_digest(
-            cast(bytes, row["csrf_secret_hash"]), csrf_hash
-        ):
-            return None
+        .mappings()
+        .one_or_none()
+    )
+    if row is None or not hmac.compare_digest(
+        cast(bytes, row["csrf_secret_hash"]), csrf_hash
+    ):
+        return SessionMissing()
 
-        if touch and cast(datetime, row["last_used_at"]) <= (
-            now - SESSION_LAST_USE_COALESCE
-        ):
-            absolute_expires_at = cast(datetime, row["absolute_expires_at"])
-            connection.execute(
-                update(web_sessions_table)
-                .where(
-                    web_sessions_table.c.id == row["id"],
-                    web_sessions_table.c.last_used_at
-                    <= (now - SESSION_LAST_USE_COALESCE),
-                )
-                .values(
-                    last_used_at=now,
-                    idle_expires_at=min(
-                        now + SESSION_IDLE_LIFETIME, absolute_expires_at
-                    ),
-                )
+    if command.touch and cast(datetime, row["last_used_at"]) <= (
+        now - SESSION_LAST_USE_COALESCE
+    ):
+        absolute_expires_at = cast(datetime, row["absolute_expires_at"])
+        connection.execute(
+            update(web_sessions_table)
+            .where(
+                web_sessions_table.c.id == row["id"],
+                web_sessions_table.c.last_used_at <= (now - SESSION_LAST_USE_COALESCE),
             )
+            .values(
+                last_used_at=now,
+                idle_expires_at=min(now + SESSION_IDLE_LIFETIME, absolute_expires_at),
+            )
+        )
 
-        return AuthSession(
+    return SessionAuthenticated(
+        AuthSession(
             id=cast(int, row["id"]),
             user_id=cast(int, row["user_id"]),
             login=cast(str, row["username"]),
             csrf_token=csrf_token,
         )
-
-
-def csrf_matches(session: AuthSession, supplied_token: str | None) -> bool:
-    return (
-        supplied_token is not None
-        and supplied_token.isascii()
-        and hmac.compare_digest(session.csrf_token, supplied_token)
     )
 
 
-def revoke_session(session: AuthSession) -> None:
-    with get_engine().begin() as connection:
-        now = _utc_now()
+def _rotate_password_on(
+    connection: Connection, command: RotatePasswordCommand
+) -> PasswordRotated:
+    password_hash = PASSWORD_HASHER.hash(command.password)
+    now = _utc_now()
+    # Keep lock order compatible with login: throttle rows precede the
+    # administrator row. This also makes the new password immediately
+    # usable after operator recovery from a blocked login.
+    connection.execute(delete(auth_login_throttle_table))
+    user_id = connection.execute(
+        select(users_table.c.id)
+        .where(
+            users_table.c.username == "admin",
+            users_table.c.role == "admin",
+            users_table.c.status == "active",
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if user_id is None:
+        raise RuntimeError("The active administrator credential is unavailable.")
+
+    updated = connection.execute(
+        update(password_credentials_table)
+        .where(password_credentials_table.c.user_id == user_id)
+        .values(password_hash=password_hash, changed_at=now)
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("The active administrator credential is unavailable.")
+
+    revoked = connection.execute(
+        update(web_sessions_table)
+        .where(web_sessions_table.c.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    return PasswordRotated(max(0, revoked.rowcount))
+
+
+def _seeded_identity_on(connection: Connection) -> SeededIdentityOutcome:
+    rows = (
         connection.execute(
-            update(web_sessions_table)
-            .where(
-                web_sessions_table.c.id == session.id,
-                web_sessions_table.c.revoked_at.is_(None),
+            select(
+                users_table.c.username,
+                users_table.c.role,
+                users_table.c.status,
+                password_credentials_table.c.password_hash,
+            ).select_from(
+                users_table.outerjoin(
+                    password_credentials_table,
+                    password_credentials_table.c.user_id == users_table.c.id,
+                )
             )
-            .values(revoked_at=now)
         )
-
-
-def set_administrator_password(password: str) -> int:
-    """Replace the sole administrator verifier and revoke every live session."""
-    password_size = len(password.encode("utf-8"))
-    if password_size < ADMIN_PASSWORD_MIN_BYTES:
-        raise ValueError(
-            f"The administrator password must be at least "
-            f"{ADMIN_PASSWORD_MIN_BYTES} UTF-8 bytes."
-        )
-    if password_size > ADMIN_PASSWORD_MAX_BYTES:
-        raise ValueError(
-            f"The administrator password must be at most "
-            f"{ADMIN_PASSWORD_MAX_BYTES} UTF-8 bytes."
-        )
-
-    password_hash = PASSWORD_HASHER.hash(password)
-    try:
-        with get_engine().begin() as connection:
-            now = _utc_now()
-            # Keep lock order compatible with login: throttle rows precede the
-            # administrator row. This also makes the new password immediately
-            # usable after operator recovery from a blocked login.
-            connection.execute(delete(auth_login_throttle_table))
-            user_id = connection.execute(
-                select(users_table.c.id)
-                .where(
-                    users_table.c.username == "admin",
-                    users_table.c.role == "admin",
-                    users_table.c.status == "active",
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if user_id is None:
-                raise RuntimeError(
-                    "The active administrator credential is unavailable."
-                )
-
-            updated = connection.execute(
-                update(password_credentials_table)
-                .where(password_credentials_table.c.user_id == user_id)
-                .values(password_hash=password_hash, changed_at=now)
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError(
-                    "The active administrator credential is unavailable."
-                )
-
-            revoked = connection.execute(
-                update(web_sessions_table)
-                .where(web_sessions_table.c.revoked_at.is_(None))
-                .values(revoked_at=now)
-            )
-            return max(0, revoked.rowcount)
-    except SQLAlchemyError as error:
-        raise RuntimeError("Could not update the administrator credential.") from error
-
-
-def verify_seeded_identity() -> None:
-    """Fail closed unless the migration's one administrator is usable."""
-    try:
-        with get_engine().connect() as connection:
-            rows = (
-                connection.execute(
-                    select(
-                        users_table.c.username,
-                        users_table.c.role,
-                        users_table.c.status,
-                        password_credentials_table.c.password_hash,
-                    ).select_from(
-                        users_table.outerjoin(
-                            password_credentials_table,
-                            password_credentials_table.c.user_id == users_table.c.id,
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-    except SQLAlchemyError as error:
-        raise RuntimeError(
-            "The seeded administrator credential is unavailable."
-        ) from error
-
+        .mappings()
+        .all()
+    )
     valid = False
     if len(rows) == 1:
         row = rows[0]
@@ -521,17 +668,7 @@ def verify_seeded_identity() -> None:
             and isinstance(password_hash, str)
         ):
             valid = _supported_password_hash(password_hash)
-    if not valid:
-        raise RuntimeError("The seeded administrator credential is missing or invalid.")
-
-
-def database_ready() -> bool:
-    try:
-        with get_engine().connect() as connection:
-            connection.execute(select(1)).scalar_one()
-        return True
-    except SQLAlchemyError:
-        return False
+    return SeededIdentityValid() if valid else SeededIdentityInvalid()
 
 
 def _supported_password_hash(password_hash: str) -> bool:
@@ -559,13 +696,6 @@ def _verify_password(password_hash: str, password: str) -> bool:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _bounded_source_key(source: str) -> str:
-    value = source.strip() or "unknown"
-    if len(value) <= MAX_SOURCE_KEY_LENGTH:
-        return value
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _ensure_throttle_bucket(
@@ -612,9 +742,7 @@ def _refresh_bucket(
 ) -> RowMapping:
     blocked_until = cast(datetime | None, bucket["blocked_until"])
     window_started_at = cast(datetime, bucket["window_started_at"])
-    if (blocked_until is not None and blocked_until <= now) or (
-        blocked_until is None and window_started_at + THROTTLE_WINDOW <= now
-    ):
+    if throttle_window_expired(window_started_at, blocked_until, now):
         connection.execute(
             update(auth_login_throttle_table)
             .where(
@@ -635,11 +763,7 @@ def _refresh_bucket(
 
 
 def _active_retry_after(bucket: RowMapping, now: datetime) -> int | None:
-    blocked_until = cast(datetime | None, bucket["blocked_until"])
-    if blocked_until is None or blocked_until <= now:
-        return None
-    seconds = math.ceil((blocked_until - now).total_seconds())
-    return max(1, min(seconds, MAX_RETRY_AFTER_SECONDS))
+    return retry_after_seconds(cast(datetime | None, bucket["blocked_until"]), now)
 
 
 def _record_failure(
@@ -710,45 +834,10 @@ def _prune_sessions(connection: Connection, now: datetime) -> None:
 def _new_session_secrets() -> tuple[str, bytes, bytes, str]:
     session_secret = secrets.token_bytes(SESSION_SECRET_BYTES)
     csrf_secret = secrets.token_bytes(CSRF_SECRET_BYTES)
-    cookie_value = _urlsafe_encode(session_secret + csrf_secret)
+    cookie_value = urlsafe_encode(session_secret + csrf_secret)
     return (
         cookie_value,
         hashlib.sha256(session_secret).digest(),
         hashlib.sha256(csrf_secret).digest(),
-        _urlsafe_encode(csrf_secret),
+        urlsafe_encode(csrf_secret),
     )
-
-
-def _decode_session_secrets(
-    cookie_value: str | None,
-) -> tuple[bytes, bytes, str] | None:
-    if cookie_value is None or len(cookie_value) > 128:
-        return None
-    try:
-        raw = _urlsafe_decode(cookie_value)
-    except ValueError:
-        return None
-    if len(raw) != SESSION_SECRET_BYTES + CSRF_SECRET_BYTES:
-        return None
-    session_secret = raw[:SESSION_SECRET_BYTES]
-    csrf_secret = raw[SESSION_SECRET_BYTES:]
-    return (
-        hashlib.sha256(session_secret).digest(),
-        hashlib.sha256(csrf_secret).digest(),
-        _urlsafe_encode(csrf_secret),
-    )
-
-
-def _urlsafe_encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _urlsafe_decode(value: str) -> bytes:
-    try:
-        return base64.b64decode(
-            value + "=" * (-len(value) % 4),
-            altchars=b"-_",
-            validate=True,
-        )
-    except ValueError as error:
-        raise ValueError("Invalid opaque session token.") from error

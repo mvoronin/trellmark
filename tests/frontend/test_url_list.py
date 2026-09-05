@@ -4,8 +4,9 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import expect
 
-import trellmark
-from trellmark.site_icons import PNG_MEDIA_TYPE, SiteIcon
+from tests.bookmarks import helpers as bookmark_helpers
+from trellmark.bookmarks.domain import SiteIcon
+from trellmark.bookmarks.integrations import PNG_MEDIA_TYPE
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8A"
@@ -44,8 +45,8 @@ class RecordingIconService:
 
 def test_frontend_renders_saved_urls(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
-    trellmark.add_url("https://two.example/path")
+    bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_url("https://two.example/path")
 
     page.goto(base_url)
 
@@ -60,7 +61,7 @@ def test_frontend_renders_saved_urls(app, page):
 
 def test_frontend_renders_saved_title_as_link_text(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example", title="One Example")
+    bookmark_helpers.seed_url("https://one.example", title="One Example")
 
     page.goto(base_url)
 
@@ -81,7 +82,7 @@ def test_frontend_adds_url_and_updates_list(app, page):
     expect(page.get_by_role("link", name="example.com")).to_have_attribute(
         "href", "https://example.com"
     )
-    assert trellmark.read_urls() == ["https://example.com"]
+    assert bookmark_helpers.saved_urls() == ["https://example.com"]
 
 
 @pytest.mark.parametrize(
@@ -101,12 +102,12 @@ def test_frontend_adds_url_with_backend_title(app, page, title_fetcher):
         "href", "https://example.com"
     )
     assert title_fetcher.calls == ["https://example.com"]
-    assert trellmark.read_url_records()[0]["title"] == "Example Domain"
+    assert bookmark_helpers.url_payloads()[0]["title"] == "Example Domain"
 
 
 def test_frontend_edits_url_and_title(app, page):
     base_url, _ = app
-    record = trellmark.add_url("https://old.example", title="Old title")
+    record = bookmark_helpers.seed_url("https://old.example", title="Old title")
 
     page.goto(base_url)
     page.get_by_role("button", name="Edit old.example in default", exact=True).click()
@@ -120,16 +121,14 @@ def test_frontend_edits_url_and_title(app, page):
     expect(page.get_by_role("link", name="New title")).to_have_attribute(
         "href", "https://new.example"
     )
-    assert trellmark.read_url_record_by_id(record["id"])["url"] == (
-        "https://new.example"
-    )
-    assert trellmark.read_url_record_by_id(record["id"])["title"] == "New title"
+    assert bookmark_helpers.url_payload(record["id"])["url"] == ("https://new.example")
+    assert bookmark_helpers.url_payload(record["id"])["title"] == "New title"
 
 
 def test_frontend_failed_url_edit_clears_stale_page_status(app, page):
     base_url, _ = app
-    trellmark.add_url("https://old.example")
-    trellmark.add_url("https://taken.example")
+    bookmark_helpers.seed_url("https://old.example")
+    bookmark_helpers.seed_url("https://taken.example")
 
     page.goto(base_url)
     page.get_by_label("URL").fill("old.example")
@@ -163,7 +162,7 @@ def test_frontend_refreshes_url_title_and_icon(
     icon_service,
 ):
     base_url, _ = app
-    trellmark.add_url("https://example.com", title="Old title")
+    bookmark_helpers.seed_url("https://example.com", title="Old title")
 
     page.goto(base_url)
     page.get_by_role(
@@ -178,12 +177,12 @@ def test_frontend_refreshes_url_title_and_icon(
     )
     assert title_fetcher.calls == ["https://example.com"]
     assert icon_service.refresh_calls == ["https://example.com"]
-    assert trellmark.read_url_records()[0]["title"] == "Fresh title"
+    assert bookmark_helpers.url_payloads()[0]["title"] == "Fresh title"
 
 
 def test_frontend_reports_when_refresh_finds_no_title(app, page):
     base_url, _ = app
-    trellmark.add_url("https://example.com", title="Existing title")
+    bookmark_helpers.seed_url("https://example.com", title="Existing title")
 
     page.goto(base_url)
     page.get_by_role(
@@ -211,8 +210,8 @@ def test_frontend_loads_only_lazy_decorative_same_origin_icons(
     icon_service,
 ):
     base_url, _ = app
-    first = trellmark.add_url("https://one.example/path")
-    second = trellmark.add_url("https://two.example")
+    first = bookmark_helpers.seed_url("https://one.example/path")
+    second = bookmark_helpers.seed_url("https://two.example")
     assert first is not None and second is not None
     requested = []
     page.on("request", lambda browser_request: requested.append(browser_request.url))
@@ -242,7 +241,7 @@ def test_frontend_loads_only_lazy_decorative_same_origin_icons(
 
 def test_frontend_keeps_local_placeholder_after_icon_error(app, page):
     base_url, _ = app
-    trellmark.add_url("https://missing.example")
+    bookmark_helpers.seed_url("https://missing.example")
 
     page.goto(base_url)
 
@@ -254,8 +253,8 @@ def test_frontend_keeps_local_placeholder_after_icon_error(app, page):
 
 def test_frontend_ignores_url_edit_response_after_dialog_is_reused(app, page):
     base_url, _ = app
-    first = trellmark.add_url("https://first.example", title="First title")
-    trellmark.add_url("https://second.example", title="Second title")
+    first = bookmark_helpers.seed_url("https://first.example", title="First title")
+    bookmark_helpers.seed_url("https://second.example", title="Second title")
     assert first is not None
 
     page.add_init_script(
@@ -305,16 +304,14 @@ def test_frontend_ignores_url_edit_response_after_dialog_is_reused(app, page):
     expect(page.locator("#url-edit-dialog")).to_be_visible()
     expect(page.get_by_label("Name / title")).to_have_value("Second title")
     expect(page.locator("#form-status")).to_be_empty()
-    assert trellmark.read_url_record_by_id(first["id"])["title"] == (
-        "Changed first title"
-    )
+    assert bookmark_helpers.url_payload(first["id"])["title"] == ("Changed first title")
 
 
 def test_frontend_url_control_labels_include_group_context(app, page):
     base_url, _ = app
-    trellmark.add_group("Reading", domains=["example.com"])
-    trellmark.add_group("Work", domains=["example.com"])
-    trellmark.add_url("https://example.com/article")
+    bookmark_helpers.seed_group("Reading", domains=["example.com"])
+    bookmark_helpers.seed_group("Work", domains=["example.com"])
+    bookmark_helpers.seed_url("https://example.com/article")
 
     page.goto(base_url)
     controls = page.locator(".url-controls [aria-label]")
@@ -330,7 +327,7 @@ def test_frontend_url_control_labels_include_group_context(app, page):
 
 def test_frontend_shows_error_for_duplicate_url(app, page):
     base_url, _ = app
-    trellmark.add_url("https://example.com")
+    bookmark_helpers.seed_url("https://example.com")
 
     page.goto(base_url)
     page.get_by_label("URL").fill("example.com")
@@ -338,7 +335,7 @@ def test_frontend_shows_error_for_duplicate_url(app, page):
 
     expect(page.locator("#form-status")).to_have_text("This URL is already saved.")
     expect(page.locator("#url-count")).to_have_text("1 saved")
-    assert trellmark.read_urls() == ["https://example.com"]
+    assert bookmark_helpers.saved_urls() == ["https://example.com"]
 
 
 def test_frontend_theme_toggle_pins_and_persists(app, page):
@@ -369,8 +366,8 @@ def test_frontend_theme_toggle_pins_and_persists(app, page):
 
 def test_frontend_deletes_url(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
-    trellmark.add_url("https://two.example")
+    bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_url("https://two.example")
 
     page.goto(base_url)
     expect(page.locator("#url-count")).to_have_text("2 saved")
@@ -382,12 +379,12 @@ def test_frontend_deletes_url(app, page):
     expect(page.locator("#form-status")).to_have_text("Deleted.")
     expect(page.locator("#url-count")).to_have_text("1 saved")
     expect(page.get_by_role("link", name="one.example")).to_have_count(0)
-    assert trellmark.read_urls() == ["https://two.example"]
+    assert bookmark_helpers.saved_urls() == ["https://two.example"]
 
 
 def test_frontend_delete_immediately_skips_confirmation(app, page):
     base_url, _ = app
-    trellmark.add_url("https://one.example")
+    bookmark_helpers.seed_url("https://one.example")
 
     page.goto(base_url)
     page.get_by_label("Delete immediately").check()
@@ -395,13 +392,13 @@ def test_frontend_delete_immediately_skips_confirmation(app, page):
 
     expect(page.locator("#form-status")).to_have_text("Deleted.")
     expect(page.locator("#url-count")).to_have_text("0 saved")
-    assert trellmark.read_urls() == []
+    assert bookmark_helpers.saved_urls() == []
 
 
 def test_frontend_sorts_by_domain(app, page):
     base_url, _ = app
-    trellmark.add_url("https://zebra.example")
-    trellmark.add_url("https://alpha.example")
+    bookmark_helpers.seed_url("https://zebra.example")
+    bookmark_helpers.seed_url("https://alpha.example")
 
     page.goto(base_url)
     page.get_by_label("Sort").select_option("domain")

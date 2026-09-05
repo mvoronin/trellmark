@@ -51,7 +51,10 @@ audit:
     uvx pip-audit --disable-pip --no-deps --requirement "$requirements"
     npm audit
 
-check: check-api-types check-frontend-artifacts lint format-check typecheck test
+check-imports:
+    uv run lint-imports
+
+check: check-api-types check-frontend-artifacts check-imports lint format-check typecheck test
 
 check-all: check audit
 

@@ -3,13 +3,14 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
-from threading import Event, Lock
+from threading import Event, Lock, get_ident
 from urllib import error, request
 from urllib.parse import urlsplit
 
 import pytest
 from argon2 import PasswordHasher
 from argon2.low_level import Type
+from fastapi.routing import iter_route_contexts
 from sqlalchemy import text
 
 from tests.helpers import (
@@ -18,23 +19,21 @@ from tests.helpers import (
     db_query,
     http_json,
     http_raw,
+    run_async,
 )
 from tests.postgres import TEST_LOGIN, TEST_PASSWORD
 from trellmark import config
 from trellmark.app import create_app
-from trellmark.identity import (
+from trellmark.identity import persistence as identity_persistence
+from trellmark.identity.application import IdentityApplicationService
+from trellmark.identity.domain import SESSION_ABSOLUTE_LIFETIME, LoginFailureRecorded
+from trellmark.identity.persistence import (
+    DUMMY_PASSWORD_HASH,
+    PASSWORD_HASHER,
     LoginBlocked,
     LoginRejected,
     create_login_session,
     set_administrator_password,
-)
-from trellmark.identity import api as identity_api
-from trellmark.identity import boundary as identity_boundary
-from trellmark.identity import repository as identity_repository
-from trellmark.identity.policy import (
-    DUMMY_PASSWORD_HASH,
-    PASSWORD_HASHER,
-    SESSION_ABSOLUTE_LIFETIME,
 )
 from trellmark.identity.routes import PUBLIC_OPERATIONS
 
@@ -120,6 +119,154 @@ def test_anonymous_api_boundary_rejects_every_existing_route_before_validation(a
     assert db_query("SELECT COUNT(*) FROM urls") == [(0,)]
 
 
+def test_default_deny_boundary_awaits_composed_identity_before_body_parsing(
+    monkeypatch,
+):
+    from trellmark.identity.domain import SessionCommand, SessionMissing
+
+    monkeypatch.setattr(config, "PUBLIC_ORIGIN", "http://localhost")
+    application = create_app()
+    service = application.state.identity_application_service
+    application.state.identity_application_service = object()
+    calls = []
+    messages = []
+
+    async def authenticate(instance, command):
+        assert instance is service
+        calls.append(command)
+        return SessionMissing()
+
+    monkeypatch.setattr(
+        IdentityApplicationService, "authenticate_session", authenticate
+    )
+
+    async def receive():
+        pytest.fail("Authentication must reject the request before reading its body.")
+
+    async def send(message):
+        messages.append(message)
+
+    async def exercise():
+        await application(
+            {
+                "type": "http",
+                "method": "PATCH",
+                "path": "/api/urls/not-an-integer",
+                "headers": [(b"content-length", b"1000001")],
+            },
+            receive,
+            send,
+        )
+
+    run_async(exercise)
+    assert calls == [SessionCommand(None)]
+    assert messages[0]["status"] == 401
+    assert (b"cache-control", b"no-store") in messages[0]["headers"]
+    assert json.loads(messages[1]["body"]) == {"error": "Authentication required."}
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    ("source_headers", "message"),
+    [
+        ([], "Request origin not allowed."),
+        ([(b"origin", b"https://other.example")], "Request origin not allowed."),
+        (
+            [(b"origin", b"http://localhost"), (b"sec-fetch-site", b"cross-site")],
+            "Request origin not allowed.",
+        ),
+        ([(b"origin", b"http://localhost")], "CSRF validation failed."),
+        (
+            [(b"origin", b"http://localhost"), (b"x-csrf-token", b"wrong")],
+            "CSRF validation failed.",
+        ),
+    ],
+)
+def test_default_deny_source_and_csrf_checks_precede_body_parsing(
+    monkeypatch, method, source_headers, message
+):
+    from trellmark.identity.domain import (
+        AuthSession,
+        SessionAuthenticated,
+        SessionCommand,
+    )
+
+    monkeypatch.setattr(config, "PUBLIC_ORIGIN", "http://localhost")
+    application = create_app()
+    service = application.state.identity_application_service
+    calls = []
+    messages = []
+
+    async def authenticate(instance, command):
+        assert instance is service
+        calls.append(command)
+        return SessionAuthenticated(AuthSession(7, 1, "admin", "synthetic-csrf"))
+
+    monkeypatch.setattr(
+        IdentityApplicationService, "authenticate_session", authenticate
+    )
+
+    async def receive():
+        pytest.fail("Source and CSRF checks must reject before body parsing.")
+
+    async def send(response):
+        messages.append(response)
+
+    async def exercise():
+        await application(
+            {
+                "type": "http",
+                "method": method,
+                "path": "/api/urls/not-an-integer",
+                "headers": [
+                    (b"cookie", b"trellmark_session_dev=synthetic-cookie"),
+                    (b"content-length", b"1000001"),
+                    *source_headers,
+                ],
+            },
+            receive,
+            send,
+        )
+
+    run_async(exercise)
+    assert calls == [SessionCommand("synthetic-cookie")]
+    assert messages[0]["status"] == 403
+    assert (b"cache-control", b"no-store") in messages[0]["headers"]
+    assert json.loads(messages[1]["body"]) == {"error": message}
+
+
+def test_default_deny_uses_exact_shared_public_operations():
+    from trellmark.identity import boundary, routes
+
+    assert boundary.PUBLIC_OPERATIONS is routes.PUBLIC_OPERATIONS
+    assert PUBLIC_OPERATIONS == {
+        ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/session"),
+        ("POST", "/api/auth/logout"),
+        ("GET", "/api/health"),
+    }
+    assert routes.READINESS_OPERATION == ("GET", "/internal/ready")
+    assert routes.READINESS_OPERATION not in PUBLIC_OPERATIONS
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/auth/login"),
+        ("POST", "/api/auth/session"),
+        ("GET", "/api/auth/logout"),
+        ("POST", "/api/health"),
+        ("GET", "/api/auth/session/"),
+        ("OPTIONS", "/api/health"),
+    ],
+)
+def test_default_deny_does_not_expand_public_paths_or_methods(app, method, path):
+    base_url, _ = app
+    status, payload, headers = _request_json(base_url, path, method=method)
+    assert (status, payload) == (401, {"error": "Authentication required."})
+    assert headers["Cache-Control"] == "no-store"
+
+
 @pytest.mark.parametrize("helper_name", ["json", "raw"])
 def test_authenticated_http_helpers_do_not_replay_a_401(app, helper_name):
     base_url, _ = app
@@ -169,10 +316,14 @@ def test_only_auth_session_logout_and_health_are_public(app):
 def test_public_health_is_process_only(app, monkeypatch):
     base_url, _ = app
 
-    def unexpected_database_probe():
+    def unexpected_database_probe(_self):
         pytest.fail("public health must not touch PostgreSQL")
 
-    monkeypatch.setattr(identity_api, "database_ready", unexpected_database_probe)
+    monkeypatch.setattr(
+        identity_persistence.PostgresIdentityQueries,
+        "database_ready",
+        unexpected_database_probe,
+    )
 
     status, payload, headers = _request_json(base_url, "/api/health")
     assert (status, payload) == (200, {"status": "ok"})
@@ -184,12 +335,14 @@ def test_blocking_login_identity_work_does_not_stall_event_loop(app, monkeypatch
     entered = Event()
     release = Event()
 
-    def stalled_login(_source, _login, _password):
+    def stalled_login(_self, _command):
         entered.set()
         assert release.wait(timeout=5), "test did not release stalled login"
-        raise LoginRejected
+        return LoginFailureRecorded()
 
-    monkeypatch.setattr(identity_api, "create_login_session", stalled_login)
+    monkeypatch.setattr(
+        identity_persistence.PostgresIdentityRepository, "login", stalled_login
+    )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         login_future = executor.submit(_login, base_url, password="wrong")
@@ -219,16 +372,18 @@ def test_login_has_dedicated_single_worker_capacity(app, monkeypatch):
     call_lock = Lock()
     call_count = 0
 
-    def stalled_login(_source, _login, _password):
+    def stalled_login(_self, _command):
         nonlocal call_count
         with call_lock:
             call_count += 1
             current_call = call_count
         (first_entered if current_call == 1 else second_entered).set()
         assert release.wait(timeout=5), "test did not release stalled logins"
-        raise LoginRejected
+        return LoginFailureRecorded()
 
-    monkeypatch.setattr(identity_api, "create_login_session", stalled_login)
+    monkeypatch.setattr(
+        identity_persistence.PostgresIdentityRepository, "login", stalled_login
+    )
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         first_login = executor.submit(_login, base_url, password="wrong")
@@ -244,6 +399,16 @@ def test_login_has_dedicated_single_worker_capacity(app, monkeypatch):
         )
         try:
             assert urls_future.result(timeout=1)[:2] == (200, {"urls": []})
+            # Queued logins must not consume both Identity worker slots.
+            session_future = executor.submit(
+                _request_json,
+                base_url,
+                "/api/auth/session",
+                headers={"Cookie": cookie},
+            )
+            session_status, session_payload, _ = session_future.result(timeout=1)
+            assert session_status == 200
+            assert session_payload["authenticated"] is True
         finally:
             release.set()
 
@@ -258,14 +423,20 @@ def test_blocking_session_lookup_does_not_stall_event_loop(app, monkeypatch):
     assert status == 200
     entered = Event()
     release = Event()
-    original_authenticate = identity_boundary.authenticate_session
+    original_authenticate = (
+        identity_persistence.PostgresIdentityRepository.authenticate_session
+    )
 
-    def stalled_authenticate(cookie_value, *, touch=True):
+    def stalled_authenticate(self, command):
         entered.set()
         assert release.wait(timeout=5), "test did not release session lookup"
-        return original_authenticate(cookie_value, touch=touch)
+        return original_authenticate(self, command)
 
-    monkeypatch.setattr(identity_boundary, "authenticate_session", stalled_authenticate)
+    monkeypatch.setattr(
+        identity_persistence.PostgresIdentityRepository,
+        "authenticate_session",
+        stalled_authenticate,
+    )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         urls_future = executor.submit(
@@ -287,21 +458,129 @@ def test_blocking_session_lookup_does_not_stall_event_loop(app, monkeypatch):
 def test_internal_readiness_is_generic_and_absent_from_openapi(app, monkeypatch):
     base_url, _ = app
     internal_routes = {
-        (route.path, frozenset(route.methods or ()))
-        for route in create_app().routes
-        if route.path.startswith("/internal/")
+        (context.route.path, frozenset(context.route.methods or ()))
+        for context in iter_route_contexts(create_app().routes)
+        if context.route.path.startswith("/internal/")
     }
 
     assert _request_json(base_url, "/internal/ready")[:2] == (
         200,
         {"status": "ok"},
     )
-    monkeypatch.setattr(identity_api, "database_ready", lambda: False)
+    monkeypatch.setattr(
+        identity_persistence.PostgresIdentityQueries,
+        "database_ready",
+        lambda _self: False,
+    )
     status, payload, headers = _request_json(base_url, "/internal/ready")
     assert (status, payload) == (503, {"error": "Service unavailable."})
     assert headers["Cache-Control"] == "no-store"
     assert "/internal/ready" not in create_app().openapi()["paths"]
     assert internal_routes == {("/internal/ready", frozenset({"GET"}))}
+
+
+@pytest.mark.parametrize("failure_kind", ["database", "operational", "pool", "alchemy"])
+@pytest.mark.parametrize(
+    "stage", ["login", "session", "logout_lookup", "revoke", "ready", "boundary"]
+)
+def test_identity_http_database_failures_are_redacted_and_rollback(
+    app, monkeypatch, caplog, stage, failure_kind
+):
+    from sqlalchemy.exc import OperationalError, SQLAlchemyError
+    from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
+
+    from tests.api.test_database_error_boundaries import (
+        PRIVATE_MARKERS,
+        _database_failure,
+    )
+
+    base_url, _ = app
+    headers = _auth_headers(base_url)
+    if stage == "boundary":
+        with db_connection() as connection:
+            connection.execute(
+                text(
+                    "UPDATE web_sessions SET created_at = created_at - interval '1 hour', "
+                    "last_used_at = last_used_at - interval '6 minutes'"
+                )
+            )
+    session_snapshot = (
+        "SELECT id, revoked_at, last_used_at, idle_expires_at "
+        "FROM web_sessions ORDER BY id"
+    )
+    initial_sessions = db_query(session_snapshot)
+    initial_throttles = db_query(
+        "SELECT * FROM auth_login_throttle ORDER BY scope, bucket_key"
+    )
+
+    class UnserializableFailure(SQLAlchemyError):
+        def __str__(self):
+            pytest.fail("Identity failures must never serialize raw database errors.")
+
+    failure = {
+        "database": _database_failure(),
+        "operational": _database_failure(OperationalError),
+        "pool": SQLAlchemyTimeoutError(" | ".join(PRIVATE_MARKERS)),
+        "alchemy": UnserializableFailure(" | ".join(PRIVATE_MARKERS)),
+    }[failure_kind]
+    owner, name = {
+        "login": (identity_persistence.PostgresIdentityRepository, "login"),
+        "session": (
+            identity_persistence.PostgresIdentityRepository,
+            "authenticate_session",
+        ),
+        "logout_lookup": (
+            identity_persistence.PostgresIdentityQueries,
+            "lookup_session",
+        ),
+        "revoke": (identity_persistence.PostgresIdentityRepository, "revoke_session"),
+        "ready": (identity_persistence.PostgresIdentityQueries, "database_ready"),
+        "boundary": (
+            identity_persistence.PostgresIdentityRepository,
+            "authenticate_session",
+        ),
+    }[stage]
+    original = getattr(owner, name)
+
+    def fail_after_operation(self, *arguments):
+        original(self, *arguments)
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner, name, fail_after_operation)
+        if stage == "login":
+            status, payload, response_headers, _ = _login(base_url)
+        else:
+            path = {
+                "session": "/api/auth/session",
+                "logout_lookup": "/api/auth/logout",
+                "revoke": "/api/auth/logout",
+                "ready": "/internal/ready",
+                "boundary": "/api/urls/not-an-integer",
+            }[stage]
+            status, payload, response_headers = _request_json(
+                base_url,
+                path,
+                method="POST" if stage in {"logout_lookup", "revoke"} else "GET",
+                headers=headers,
+            )
+    assert (status, payload) == (503, {"error": "Service unavailable."})
+    assert response_headers["Cache-Control"] == "no-store"
+    assert "Set-Cookie" not in response_headers
+    assert all(marker not in json.dumps(payload) for marker in PRIVATE_MARKERS)
+    assert all(marker not in str(response_headers) for marker in PRIVATE_MARKERS)
+    assert all(marker not in caplog.text for marker in PRIVATE_MARKERS)
+    assert db_query(session_snapshot) == initial_sessions
+    assert (
+        db_query("SELECT * FROM auth_login_throttle ORDER BY scope, bucket_key")
+        == initial_throttles
+    )
+    assert (
+        _request_json(base_url, "/api/auth/session", headers=headers)[1][
+            "authenticated"
+        ]
+        is True
+    )
 
 
 def test_wrong_login_and_password_are_indistinguishable(app):
@@ -316,13 +595,13 @@ def test_wrong_login_and_password_are_indistinguishable(app):
 def test_unknown_login_runs_bounded_dummy_argon_verification(app, monkeypatch):
     base_url, _ = app
     verified_hashes = []
-    original_verify = identity_repository._verify_password
+    original_verify = identity_persistence._verify_password
 
     def recording_verify(password_hash, password):
         verified_hashes.append(password_hash)
         return original_verify(password_hash, password)
 
-    monkeypatch.setattr(identity_repository, "_verify_password", recording_verify)
+    monkeypatch.setattr(identity_persistence, "_verify_password", recording_verify)
     unknown_durations = []
     known_durations = []
     for _ in range(3):
@@ -903,3 +1182,450 @@ def test_public_origin_fails_closed(monkeypatch, origin):
     monkeypatch.setattr(config, "PUBLIC_ORIGIN", origin)
     with pytest.raises(RuntimeError, match="TRELLMARK_PUBLIC_ORIGIN"):
         config.public_origin()
+
+
+def _identity_service():
+    from anyio import CapacityLimiter
+
+    from trellmark.identity.application import IdentityApplicationService
+    from trellmark.identity.persistence import (
+        PostgresIdentityQueries,
+        PostgresIdentityUnitOfWorkFactory,
+    )
+    from trellmark.platform.runtime import (
+        IDENTITY_WORK_CAPACITY,
+        AnyIOWorkRunner,
+        get_engine,
+    )
+
+    return IdentityApplicationService(
+        AnyIOWorkRunner(CapacityLimiter(IDENTITY_WORK_CAPACITY)),
+        PostgresIdentityUnitOfWorkFactory(get_engine),
+        PostgresIdentityQueries(get_engine),
+    )
+
+
+def test_identity_login_service_preserves_throttle_effects_and_session_values(database):
+    import anyio
+
+    from trellmark.identity.domain import (
+        LoginCommand,
+        LoginCreated,
+        LoginFailureRecorded,
+        LoginThrottled,
+        SessionAuthenticated,
+        SessionCommand,
+        csrf_matches,
+    )
+
+    async def scenario():
+        service = _identity_service()
+        for _ in range(10):
+            outcome = await service.login(LoginCommand("203.0.113.8", "admin", "wrong"))
+            assert isinstance(outcome, LoginFailureRecorded)
+        blocked = await service.login(
+            LoginCommand("203.0.113.8", "admin", TEST_PASSWORD)
+        )
+        assert isinstance(blocked, LoginThrottled)
+        assert 1 <= blocked.retry_after <= 900
+        created = await service.login(
+            LoginCommand("203.0.113.9", "  AdMiN  ", TEST_PASSWORD)
+        )
+        assert isinstance(created, LoginCreated)
+        authenticated = await service.authenticate_session(
+            SessionCommand(created.cookie_value, touch=False)
+        )
+        assert isinstance(authenticated, SessionAuthenticated)
+        assert authenticated.session == created.session
+        assert csrf_matches(created.session, created.session.csrf_token)
+        assert not csrf_matches(created.session, "wrong")
+        assert not csrf_matches(created.session, "é")
+        assert not hasattr(created.session, "__dict__")
+        assert not hasattr(service, "__dict__")
+        assert created.cookie_value not in repr(created)
+        assert created.session.csrf_token not in repr(created.session)
+
+    anyio.run(scenario)
+    assert db_query(
+        "SELECT failure_count FROM auth_login_throttle "
+        "WHERE scope = 'source' AND bucket_key = '203.0.113.8'"
+    ) == [(10,)]
+
+
+def test_identity_session_uow_rolls_back_without_explicit_commit(database):
+    from trellmark.identity.domain import LoginCommand, LoginCreated
+    from trellmark.identity.persistence import PostgresIdentityUnitOfWorkFactory
+    from trellmark.platform.runtime import get_engine
+
+    factory = PostgresIdentityUnitOfWorkFactory(get_engine)
+    with factory() as unit_of_work:
+        result = unit_of_work.identity.login(
+            LoginCommand("203.0.113.10", TEST_LOGIN, TEST_PASSWORD)
+        )
+        assert isinstance(result, LoginCreated)
+
+    assert db_query("SELECT COUNT(*) FROM web_sessions") == [(0,)]
+    assert db_query("SELECT COUNT(*) FROM auth_login_throttle") == [(0,)]
+
+
+@pytest.mark.parametrize("failure_stage", ["begin", "work", "commit"])
+@pytest.mark.parametrize("cleanup_stage", ["rollback", "close"])
+def test_identity_session_uow_preserves_primary_exception_during_cleanup(
+    failure_stage, cleanup_stage
+):
+    """Lifecycle doubles test exception priority, not PostgreSQL semantics."""
+    from trellmark.identity.persistence import PostgresIdentityUnitOfWorkFactory
+
+    primary = RuntimeError("synthetic private operation marker")
+    secondary = RuntimeError("synthetic private cleanup marker")
+    events = []
+
+    class Transaction:
+        is_active = True
+
+        def commit(self):
+            events.append("commit")
+            if failure_stage == "commit":
+                raise primary
+            self.is_active = False
+
+        def rollback(self):
+            events.append("rollback")
+            if cleanup_stage == "rollback":
+                raise secondary
+            self.is_active = False
+
+    class Connection:
+        def begin(self):
+            events.append("begin")
+            if failure_stage == "begin":
+                raise primary
+            return Transaction()
+
+        def close(self):
+            events.append("close")
+            if cleanup_stage == "close":
+                raise secondary
+
+    class Engine:
+        def connect(self):
+            events.append("connect")
+            return Connection()
+
+    factory = PostgresIdentityUnitOfWorkFactory(Engine)
+    with pytest.raises(RuntimeError) as caught:
+        with factory() as unit_of_work:
+            if failure_stage == "work":
+                raise primary
+            unit_of_work.commit()
+
+    assert caught.value is primary
+    assert events[0:2] == ["connect", "begin"]
+    assert events[-1] == "close"
+
+
+def test_identity_capacity_bounds_database_work_and_keeps_event_loop_responsive(
+    database,
+):
+    import anyio
+    from sqlalchemy import event
+
+    from trellmark.platform.runtime import get_engine
+
+    engine = get_engine()
+    two_entered = Event()
+    release = Event()
+    lock = Lock()
+    started = []
+
+    def stall_query(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.strip() != "SELECT 1":
+            return
+        with lock:
+            started.append(get_ident())
+            if len(started) == 2:
+                two_entered.set()
+        assert release.wait(timeout=5), "readiness worker was not released"
+
+    async def scenario():
+        service = _identity_service()
+        results = []
+        loop_thread = get_ident()
+
+        async def probe():
+            results.append(await service.database_ready())
+
+        try:
+            async with anyio.create_task_group() as tasks:
+                for _ in range(3):
+                    tasks.start_soon(probe)
+                assert await anyio.to_thread.run_sync(two_entered.wait, 2)
+                with anyio.fail_after(2):
+                    while service.work_runner.limiter.statistics().tasks_waiting != 1:
+                        await anyio.sleep(0)
+                assert len(started) == 2
+                assert service.work_runner.limiter.total_tokens == 2
+                assert service.work_runner.limiter.borrowed_tokens == 2
+                assert all(thread != loop_thread for thread in started)
+                # Reaching this line while both SQL calls wait proves loop progress.
+                release.set()
+        finally:
+            release.set()
+        assert results == [True, True, True]
+        assert len(started) == 3
+
+    event.listen(engine, "before_cursor_execute", stall_query)
+    try:
+        anyio.run(scenario)
+    finally:
+        release.set()
+        event.remove(engine, "before_cursor_execute", stall_query)
+
+
+def test_identity_capacity_covers_every_complete_database_operation(
+    database, monkeypatch
+):
+    import anyio
+    from sqlalchemy import event
+
+    from trellmark.identity.domain import (
+        IdentityCleaned,
+        LoginCommand,
+        LoginCreated,
+        LoginFailureRecorded,
+        PasswordRotated,
+        RevokeSessionCommand,
+        RotatePasswordCommand,
+        SeededIdentityValid,
+        SessionAuthenticated,
+        SessionCommand,
+        SessionRevoked,
+    )
+    from trellmark.platform.runtime import get_engine
+
+    engine = get_engine()
+    events = []
+    limiters = []
+    workload_limiters = []
+    original_run_sync = anyio.to_thread.run_sync
+
+    async def recording_run_sync(function, *args, **kwargs):
+        assert workload_limiters[0].borrowed_tokens == 1
+        limiters.append(kwargs["limiter"])
+        return await original_run_sync(function, *args, **kwargs)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", recording_run_sync)
+
+    def listener(name):
+        def record(*_args):
+            assert workload_limiters[0].borrowed_tokens == 1
+            events.append((name, get_ident()))
+
+        return record
+
+    listeners = {
+        name: listener(name)
+        for name in (
+            "checkout",
+            "begin",
+            "before_cursor_execute",
+            "commit",
+            "rollback",
+            "checkin",
+        )
+    }
+
+    async def scenario():
+        service = _identity_service()
+        workload_limiters.append(service.work_runner.limiter)
+        loop_thread = get_ident()
+        operations = [
+            (service.database_ready(), bool),
+            (service.seeded_identity(), SeededIdentityValid),
+            (
+                service.login(LoginCommand("203.0.113.11", TEST_LOGIN, "wrong")),
+                LoginFailureRecorded,
+            ),
+            (
+                service.login(LoginCommand("203.0.113.11", TEST_LOGIN, TEST_PASSWORD)),
+                LoginCreated,
+            ),
+        ]
+
+        async def check(operation, expected):
+            events.clear()
+            result = await operation
+            assert isinstance(result, expected)
+            names = [name for name, _thread in events]
+            assert names.count("checkout") == names.count("checkin") == 1
+            assert names[0] == "checkout" and names[-1] == "checkin"
+            assert names.count("begin") == 1
+            assert len({thread for _name, thread in events}) == 1
+            assert events[0][1] != loop_thread
+            return result
+
+        for operation, expected in operations:
+            result = await check(operation, expected)
+        assert isinstance(result, LoginCreated)
+        for touch in (False, True):
+            await check(
+                service.authenticate_session(
+                    SessionCommand(result.cookie_value, touch=touch)
+                ),
+                SessionAuthenticated,
+            )
+            assert ("commit" in [name for name, _ in events]) is touch
+        rotated = await check(
+            service.rotate_password(RotatePasswordCommand(TEST_PASSWORD)),
+            PasswordRotated,
+        )
+        assert rotated.revoked_sessions == 1
+        await check(
+            service.revoke_session(RevokeSessionCommand(result.session.id)),
+            SessionRevoked,
+        )
+        await check(service.cleanup(), IdentityCleaned)
+        assert len(limiters) == 9
+        assert all(limiter.total_tokens == float("inf") for limiter in limiters)
+        assert service.work_runner.limiter.borrowed_tokens == 0
+        assert service.work_runner.limiter.total_tokens == 2
+
+    for name, callback in listeners.items():
+        event.listen(engine, name, callback)
+    try:
+        anyio.run(scenario)
+    finally:
+        for name, callback in listeners.items():
+            event.remove(engine, name, callback)
+    assert db_query("SELECT COUNT(*) FROM web_sessions") == [(0,)]
+    assert db_query("SELECT COUNT(*) FROM auth_login_throttle") == [(0,)]
+
+
+@pytest.mark.parametrize("failure_stage", ["repository", "commit"])
+def test_identity_login_capacity_preserves_unexpected_exception_and_rolls_back(
+    database, monkeypatch, caplog, failure_stage
+):
+    import anyio
+
+    from trellmark.identity.domain import LoginCommand
+
+    failure = RuntimeError("synthetic-credential-and-session-marker")
+    if failure_stage == "repository":
+        original = identity_persistence.PostgresIdentityRepository.login
+
+        def fail_after_write(self, command):
+            original(self, command)
+            raise failure
+
+        monkeypatch.setattr(
+            identity_persistence.PostgresIdentityRepository, "login", fail_after_write
+        )
+    else:
+
+        def fail_commit(_self):
+            raise failure
+
+        monkeypatch.setattr(
+            identity_persistence.PostgresIdentityUnitOfWork, "commit", fail_commit
+        )
+
+    async def scenario():
+        with pytest.raises(RuntimeError) as caught:
+            await _identity_service().login(
+                LoginCommand("203.0.113.12", TEST_LOGIN, TEST_PASSWORD)
+            )
+        assert caught.value is failure
+
+    anyio.run(scenario)
+    assert db_query("SELECT COUNT(*) FROM web_sessions") == [(0,)]
+    assert db_query("SELECT COUNT(*) FROM auth_login_throttle") == [(0,)]
+    assert str(failure) not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "operation", ["database_ready", "seeded_identity", "lookup_session"]
+)
+def test_identity_session_queries_preserve_unexpected_exception_identity(
+    database, monkeypatch, operation
+):
+    import anyio
+
+    from trellmark.identity.domain import LoginCommand, SessionCommand
+
+    failure = RuntimeError("synthetic-private-query-marker")
+
+    def fail_query(_self, *_args):
+        raise failure
+
+    async def scenario():
+        service = _identity_service()
+        created = await service.login(
+            LoginCommand("203.0.113.13", TEST_LOGIN, TEST_PASSWORD)
+        )
+        monkeypatch.setattr(
+            identity_persistence.PostgresIdentityQueries, operation, fail_query
+        )
+        with pytest.raises(RuntimeError) as caught:
+            if operation == "lookup_session":
+                await service.authenticate_session(
+                    SessionCommand(created.cookie_value, touch=False)
+                )
+            else:
+                await getattr(service, operation)()
+        assert caught.value is failure
+
+    anyio.run(scenario)
+
+
+def test_identity_session_missing_outcome_rolls_back_prior_work(database, monkeypatch):
+    import anyio
+
+    from trellmark.identity.domain import LoginCommand, SessionCommand, SessionMissing
+
+    def fail_after_write(self, _command):
+        self.connection.execute(text("UPDATE users SET status = 'inactive'"))
+        return SessionMissing()
+
+    async def scenario():
+        service = _identity_service()
+        created = await service.login(
+            LoginCommand("203.0.113.14", TEST_LOGIN, TEST_PASSWORD)
+        )
+        monkeypatch.setattr(
+            identity_persistence.PostgresIdentityRepository,
+            "authenticate_session",
+            fail_after_write,
+        )
+        outcome = await service.authenticate_session(
+            SessionCommand(created.cookie_value)
+        )
+        assert isinstance(outcome, SessionMissing)
+
+    anyio.run(scenario)
+    assert db_query("SELECT status FROM users") == [("active",)]
+
+
+@pytest.mark.parametrize("cookie", [None, "not-a-session", "é", "x" * 129])
+def test_identity_session_invalid_cookie_needs_no_database(cookie, monkeypatch):
+    import anyio
+
+    from trellmark.identity.domain import SessionCommand, SessionMissing
+
+    def unavailable():
+        pytest.fail("invalid or absent cookies must not acquire a connection")
+
+    monkeypatch.setattr(identity_persistence, "get_engine", unavailable)
+    assert identity_persistence.authenticate_session(cookie) is None
+    assert identity_persistence.authenticate_session(cookie, touch=False) is None
+
+    async def scenario():
+        from dataclasses import replace
+
+        service = replace(_identity_service(), uow_factory=unavailable, queries=None)
+        for touch in (True, False):
+            assert isinstance(
+                await service.authenticate_session(SessionCommand(cookie, touch=touch)),
+                SessionMissing,
+            )
+
+    anyio.run(scenario)
