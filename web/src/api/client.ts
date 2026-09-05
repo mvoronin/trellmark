@@ -1,4 +1,5 @@
-import type { components, paths } from "./generated/openapi";
+import type { components, paths } from "../generated/openapi.js";
+import { createRequestLifetime, type RequestTicket } from "../shared/request.js";
 
 type ResponsesOf<Operation> = Operation extends { responses: infer Responses }
   ? Responses
@@ -84,6 +85,7 @@ const logoutPath = "/api/auth/logout" satisfies keyof paths;
 let csrfToken: string | null = null;
 let sessionExpiredHandler: (() => void) | null = null;
 let expiryTransitionSent = false;
+const sessionLifetime = createRequestLifetime();
 
 export class SessionExpiredError extends Error {}
 
@@ -106,24 +108,33 @@ export function isImportApiError(error: unknown): error is ImportApiError {
   return error instanceof ImportApiError;
 }
 
-export function setSessionExpiredHandler(handler: () => void): void {
+export function setSessionExpiredHandler(handler: () => void): () => void {
   sessionExpiredHandler = handler;
+  return () => {
+    if (sessionExpiredHandler === handler) sessionExpiredHandler = null;
+  };
 }
 
 export function establishSession(token: string): void {
+  sessionLifetime.invalidate();
   csrfToken = token;
   expiryTransitionSent = false;
 }
 
 export function clearSession(): void {
+  sessionLifetime.invalidate();
   csrfToken = null;
 }
 
-function expiredSessionError(): SessionExpiredError {
-  clearSession();
-  if (!expiryTransitionSent) {
-    expiryTransitionSent = true;
-    sessionExpiredHandler?.();
+function expiredSessionError(ticket: RequestTicket): SessionExpiredError {
+  // Check ownership here, before global CSRF state or the UI callback changes.
+  // Caller guards run too late to protect a newly established session.
+  if (sessionLifetime.isCurrent(ticket)) {
+    clearSession();
+    if (!expiryTransitionSent) {
+      expiryTransitionSent = true;
+      sessionExpiredHandler?.();
+    }
   }
   return new SessionExpiredError("Your session has expired.");
 }
@@ -180,12 +191,13 @@ async function jsonRequest<ResponseBody>(
   authenticationRequired = true,
   errorFactory?: (status: number, payload: unknown, fallback: string) => Error,
 ): Promise<ResponseBody> {
+  const ticket = sessionLifetime.capture();
   const response = await fetch(path, { ...init, credentials: "same-origin" });
   const payload = await readJson(response);
 
   if (!response.ok) {
     if (response.status === 401 && authenticationRequired) {
-      throw expiredSessionError();
+      throw expiredSessionError(ticket);
     }
     if (errorFactory) {
       throw errorFactory(response.status, payload, fallbackError);
@@ -250,38 +262,58 @@ function unsafeInit(method: "POST" | "PATCH" | "DELETE"): RequestInit {
 }
 
 export async function getSession(): Promise<SessionPayload> {
-  return jsonRequest<SessionPayload>(
-    sessionPath,
-    { method: "GET" },
-    "Could not check your session.",
-    false,
-  );
+  const ticket = sessionLifetime.begin();
+  try {
+    const session = await jsonRequest<SessionPayload>(
+      sessionPath,
+      { method: "GET" },
+      "Could not check your session.",
+      false,
+    );
+    if (sessionLifetime.isCurrent(ticket)) {
+      if (session.authenticated) establishSession(session.csrf_token);
+      else clearSession();
+    }
+    return session;
+  } finally {
+    sessionLifetime.finish(ticket);
+  }
 }
 
 export async function login(body: LoginPayload): Promise<AuthenticatedSession> {
-  const session = await jsonRequest<AuthenticatedSession>(
-    loginPath,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    "Could not log in.",
-    false,
-  );
-  establishSession(session.csrf_token);
-  return session;
+  const ticket = sessionLifetime.begin();
+  try {
+    const session = await jsonRequest<AuthenticatedSession>(
+      loginPath,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      "Could not log in.",
+      false,
+    );
+    if (sessionLifetime.isCurrent(ticket)) establishSession(session.csrf_token);
+    return session;
+  } finally {
+    sessionLifetime.finish(ticket);
+  }
 }
 
 export async function logout(): Promise<JsonResponse<LogoutOperation, 200>> {
-  const response = await jsonRequest<JsonResponse<LogoutOperation, 200>>(
-    logoutPath,
-    unsafeInit("POST"),
-    "Could not log out.",
-    false,
-  );
-  clearSession();
-  return response;
+  const ticket = sessionLifetime.begin();
+  try {
+    const response = await jsonRequest<JsonResponse<LogoutOperation, 200>>(
+      logoutPath,
+      unsafeInit("POST"),
+      "Could not log out.",
+      false,
+    );
+    if (sessionLifetime.isCurrent(ticket)) clearSession();
+    return response;
+  } finally {
+    sessionLifetime.finish(ticket);
+  }
 }
 
 export async function listGroups(): Promise<GroupsPayload> {
@@ -293,9 +325,10 @@ export async function listGroups(): Promise<GroupsPayload> {
 }
 
 export async function exportData(): Promise<Response> {
+  const ticket = sessionLifetime.capture();
   const response = await fetch(exportPath, { credentials: "same-origin" });
   if (response.status === 401) {
-    throw expiredSessionError();
+    throw expiredSessionError(ticket);
   }
   if (!response.ok) {
     throw new Error(errorMessage(await readJson(response), "Could not export URLs."));

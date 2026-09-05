@@ -1,9 +1,69 @@
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 from tests.bookmarks import helpers as bookmark_helpers
 from tests.postgres import TEST_LOGIN, TEST_PASSWORD
+
+
+@pytest.mark.parametrize("completion_owner", ["disposed", "private-clear"])
+def test_drag_factory_cancel_dispose_and_foreign_targets(static_page, completion_owner):
+    result = static_page.evaluate(
+        """async completionOwner => {
+          const { createBookmarkDrag } = await import('/static/features/bookmarks/drag.js');
+          const { createBookmarksModel } = await import('/static/features/bookmarks/model.js');
+          const { createRequestLifetime } = await import('/static/shared/request.js');
+          const model = createBookmarksModel();
+          model.replaceGroups([1, 2].map(id => ({id, name: 'equal', position: 0,
+            parent_id: null, children: [], urls: [], domains: [], nsfw: false})));
+          const root = document.createElement('div');
+          const make = id => {
+            const section = document.createElement('section');
+            const header = document.createElement('header');
+            header.className = 'group-header'; header.dataset.groupId = String(id);
+            header.dataset.parentId = ''; section.append(header); return {header, section};
+          };
+          const first = make(1), second = make(2), foreign = make(2);
+          root.append(first.section, second.section); document.body.append(root, foreign.section);
+          let captured = false, complete, calls = 0, replacements = 0;
+          first.header.setPointerCapture = () => { captured = true; };
+          first.header.hasPointerCapture = () => captured;
+          first.header.releasePointerCapture = () => { captured = false; };
+          let target = second.header;
+          document.elementFromPoint = () => target;
+          second.header.getBoundingClientRect = () => ({top: 0, height: 40});
+          const privateLifetime = createRequestLifetime();
+          const drag = createBookmarkDrag(root, { model, privateLifetime,
+            reorder: () => { calls++; return new Promise(resolve => { complete = resolve; }); },
+            replace: () => { replacements++; }, load: async () => {}, status: () => {} });
+          drag.makeHeaderDraggable(first.header, first.section, 1, null);
+          const send = type => first.header.dispatchEvent(new PointerEvent(type,
+            {pointerId: 1, isPrimary: true, button: 0, clientX: type === 'pointerdown' ? 0 : 20, clientY: 35}));
+          send('pointerdown'); send('pointermove');
+          const moving = captured && first.section.classList.contains('dragging');
+          send('pointercancel');
+          const cancelled = !captured && model.ui.activeDrag === null && calls === 0;
+          target = foreign.header; send('pointerdown'); send('pointermove'); send('pointerup');
+          const forbidden = calls === 0 && !foreign.header.classList.contains('drag-over');
+          target = second.header; send('pointerdown'); send('pointermove'); send('pointerup');
+          if (completionOwner === 'disposed') drag.dispose();
+          else { privateLifetime.invalidate(); model.clearGroups(); }
+          complete({groups: []}); await Promise.resolve(); await Promise.resolve();
+          drag.dispose();
+          send('pointerdown');
+          return {moving, cancelled, forbidden, calls, replacements, disposed: model.ui.activeDrag === null};
+        }""",
+        completion_owner,
+    )
+    assert result == {
+        "moving": True,
+        "cancelled": True,
+        "forbidden": True,
+        "calls": 1,
+        "replacements": 0,
+        "disposed": True,
+    }
 
 
 def group_header(page, name):
@@ -42,6 +102,34 @@ def mouse_drag_over(page, source, target, y_fraction=0.15):
 def mouse_drag(page, source, target, y_fraction=0.15):
     mouse_drag_over(page, source, target, y_fraction)
     page.mouse.up()
+
+
+def test_drag_keeps_captured_header_and_folded_descendants_during_movement(app, page):
+    base_url, _ = app
+    parent = bookmark_helpers.seed_group("Parent")
+    child = bookmark_helpers.seed_group("Child", parent_id=parent["id"])
+    bookmark_helpers.seed_group("Grandchild", parent_id=child["id"])
+    bookmark_helpers.seed_group("Other")
+    page.goto(base_url)
+    page.get_by_role("button", name="Toggle Parent", exact=True).click()
+    source = group_header(page, "Parent")
+    source.evaluate("""header => {
+      window.capturedHeader = header;
+      header.addEventListener('pointerdown', event => { window.dragPointer = event.pointerId; },
+        {once: true});
+    }""")
+    mouse_drag_over(page, source, group_header(page, "Other"), y_fraction=0.85)
+    assert source.evaluate("""header => header === window.capturedHeader &&
+      header.isConnected && header.hasPointerCapture(window.dragPointer)""")
+    expect(page.get_by_role("heading", name="Grandchild", exact=True)).to_be_hidden()
+    page.mouse.up()
+    expect(page.locator("#form-status")).to_have_text("Reordered.")
+    expect(page.locator(".group-name")).to_have_text(
+        ["default", "Other", "Parent", "Child", "Grandchild"]
+    )
+    expect(
+        page.get_by_role("button", name="Toggle Parent", exact=True)
+    ).to_have_attribute("aria-expanded", "false")
 
 
 def touch_drag(page, source, target, y_fraction=0.15):

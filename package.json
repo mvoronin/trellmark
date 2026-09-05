@@ -6,7 +6,9 @@
     "tools/openapi-types"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node scripts/frontend_build.cjs",
+    "check:frontend-artifacts": "node scripts/check_frontend_artifacts.cjs",
+    "check:imports": "node scripts/check_frontend_imports.cjs",
     "generate:api-types": "npm run generate --workspace trellmark-openapi-types-tool",
     "postinstall": "npm run verify:compiler",
     "typecheck": "tsc --noEmit",

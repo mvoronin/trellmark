@@ -19,7 +19,21 @@
 - [x] **ARCH-02**: Every mutating use case owns an explicit transaction boundary through narrow unit-of-work and repository ports.
 - [x] **ARCH-03**: SQLAlchemy adapters preserve existing PostgreSQL constraints, hierarchy behavior, locking, concurrency semantics, and typed application errors without leaking storage sentinels.
 - [x] **ARCH-04**: Focused API routers and a small composition root preserve current bookmark paths, payloads, generated contracts, security middleware, and behavior in one deployable service.
-- [ ] **ARCH-05**: The browser is separated into a shared authenticated shell and an independent Bookmarks feature, and automated dependency rules reject forbidden backend and frontend imports.
+- [x] **ARCH-05**: The browser is separated into a shared authenticated shell and an independent Bookmarks feature, and automated dependency rules reject forbidden backend and frontend imports.
+
+### Frontend Restructuring Epic (#36)
+
+These requirements expand ARCH-05 within Phase 3 and cover every child of [epic #36](https://github.com/mvoronin/trellmark/issues/36). The linked child acceptance criteria and roadmap constraints apply in full.
+
+- [x] **FRONT-01**: Record the framework-free TypeScript decision in a numbered, dated ADR under `doc/adr/`, with measured context, alternatives, strongest counterargument, consequences, and observable reconsideration triggers ([#37](https://github.com/mvoronin/trellmark/issues/37)).
+- [x] **FRONT-02**: Compile the strict TypeScript source tree and compare every emitted artifact, including gallery output, in both `just check` and CI; detect corrupted, missing, and stale outputs, explicitly exclude hand-maintained assets, and update build documentation ([#38](https://github.com/mvoronin/trellmark/issues/38)).
+- [x] **FRONT-03**: Separate API-owned server state from interaction/UI state; named operations own state changes and rendering never mutates state, preserving full re-render, sort/filter/fold/theme persistence, and graceful browser-storage failure behavior ([#39](https://github.com/mvoronin/trellmark/issues/39)).
+- [x] **FRONT-04**: Replace every existing request serial and parallel in-flight flag with one DOM-independent shared primitive using monotonic tickets, so superseded responses cannot restore stale DOM/status or strand disabled controls ([#40](https://github.com/mvoronin/trellmark/issues/40)).
+- [x] **FRONT-05**: Use a typed `h()` helper for existing group/URL/icon DOM construction, rejecting unknown properties and HTML-string sinks while preserving DOM structure, classes, ARIA, existing shell HTML, and explicit namespaced SVG construction ([#41](https://github.com/mvoronin/trellmark/issues/41)).
+- [x] **FRONT-06**: Extract shell-owned authentication/session/CSRF, toolbar, status, modal/confirmation, theme, and current import/export behavior; `main.ts` owns application composition, and markup handles stay with their owners ([#42](https://github.com/mvoronin/trellmark/issues/42)).
+- [x] **FRONT-07**: Put Bookmarks state/operations, DOM, and public entry in `features/bookmarks/model.ts`, `view.ts`, and `index.ts`, preserving editing, hierarchy, default-group protection, Safe mode, metadata, reordering, and folding without shared handle growth or a catch-all `app.ts` ([#43](https://github.com/mvoronin/trellmark/issues/43)).
+- [x] **FRONT-08**: Parse and enforce the frontend import graph in local and CI gates: reject cross-feature imports, feature-to-shell imports, shared-to-outside imports, composition outside designated entry points, direct generated transport-type access outside `api/`, and extensionless relative imports, with named edge diagnostics and negative proofs ([#44](https://github.com/mvoronin/trellmark/issues/44)).
+- [x] **FRONT-09**: Provide `web/design.html` using real side-effect-free views and synthetic fixtures, without backend/login/API calls or duplicated component markup/styles; cover empty/long-title/icon-failure/important/NSFW/depth/fold/drag/dialog/status states, switchable themes, contrast/overflow checks, and an explicit deployment decision ([#45](https://github.com/mvoronin/trellmark/issues/45)).
 
 ### Note Groups
 
@@ -136,7 +150,16 @@ Explicitly excluded to prevent scope creep.
 | ARCH-02 | Phase 2 | Complete |
 | ARCH-03 | Phase 2 | Complete |
 | ARCH-04 | Phase 2 | Complete |
-| ARCH-05 | Phase 3 | Pending |
+| ARCH-05 | Phase 3 | Complete |
+| FRONT-01 | Phase 3 | Complete |
+| FRONT-02 | Phase 3 | Complete |
+| FRONT-03 | Phase 3 | Complete |
+| FRONT-04 | Phase 3 | Complete |
+| FRONT-05 | Phase 3 | Complete |
+| FRONT-06 | Phase 3 | Complete |
+| FRONT-07 | Phase 3 | Complete |
+| FRONT-08 | Phase 3 | Complete |
+| FRONT-09 | Phase 3 | Complete |
 | NGRP-01 | Phase 4 | Pending |
 | NGRP-02 | Phase 4 | Pending |
 | NGRP-03 | Phase 4 | Pending |
@@ -171,10 +194,10 @@ Explicitly excluded to prevent scope creep.
 
 **Coverage:**
 
-- v1 requirements: 41 total
-- Mapped to phases: 41
+- v1 requirements: 50 total
+- Mapped to phases: 50
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-29*
-*Last updated: 2026-08-29 after roadmap creation*
+*Last updated: 2026-09-05 after completing and verifying Phase 3*

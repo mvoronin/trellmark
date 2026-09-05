@@ -14,6 +14,127 @@ PNG = base64.b64decode(
 )
 
 
+def test_bookmark_editor_factory_scopes_fields_and_rejects_old_completion(static_page):
+    result = static_page.evaluate(
+        """async () => {
+          const before = document.body.innerHTML;
+          const effects = [];
+          const originals = [];
+          for (const [owner, key] of [
+            [Document.prototype, 'querySelector'], [Document.prototype, 'querySelectorAll'],
+            [EventTarget.prototype, 'addEventListener'],
+            [Storage.prototype, 'getItem'], [Storage.prototype, 'setItem'], [window, 'fetch'],
+          ]) {
+            originals.push([owner, key, owner[key]]);
+            owner[key] = () => { effects.push(key); throw Error(`Import side effect: ${key}`); };
+          }
+          let createBookmarkEditors;
+          try {
+            ({ createBookmarkEditors } = await import('/static/features/bookmarks/editors.js'));
+          } finally {
+            for (const [owner, key, original] of originals) owner[key] = original;
+          }
+          const inert = document.body.innerHTML === before;
+          const { createBookmarksModel } = await import('/static/features/bookmarks/model.js');
+          const { createDialogs } = await import('/static/shell/dialogs.js');
+          const { createRequestLifetime } = await import('/static/shared/request.js');
+          const html = await (await fetch('/index.html')).text();
+          const parsed = new DOMParser().parseFromString(html, 'text/html');
+          const root = document.createElement('div');
+          root.append(...parsed.body.children);
+          const decoy = document.createElement('input');
+          decoy.id = 'url-edit-title'; decoy.value = 'Outside';
+          document.body.append(decoy, root);
+          const model = createBookmarksModel();
+          const dialogs = createDialogs(root);
+          let finish;
+          let replacements = 0;
+          const editors = createBookmarkEditors(root, {
+            model, dialogs, status() {}, privateLifetime: createRequestLifetime(),
+            api: { editUrl: () => new Promise(resolve => { finish = resolve; }) },
+            refresh: { replace() { replacements++; }, render() {}, async load() {}, async ready() {} },
+          });
+          const record = { id: 1, url: 'https://example.test', title: 'Original', version: 1 };
+          editors.showUrlEditor(record);
+          const title = root.querySelector('#url-edit-title');
+          title.value = 'Old draft';
+          root.querySelector('#url-edit-form').requestSubmit();
+          root.querySelector('#url-edit-cancel').click();
+          editors.showUrlEditor(record);
+          title.value = 'New draft';
+          finish({groups: []});
+          await new Promise(resolve => setTimeout(resolve, 0));
+          const result = { inert, effects, outside: decoy.value, title: title.value, replacements,
+            open: dialogs.isOpen('url-edit-dialog'), disabled: root.querySelector('#url-edit-save').disabled };
+          editors.clear();
+          dialogs.dispose();
+          return result;
+        }"""
+    )
+    assert result == {
+        "inert": True,
+        "effects": [],
+        "outside": "Outside",
+        "title": "New draft",
+        "replacements": 0,
+        "open": True,
+        "disabled": False,
+    }
+
+
+def test_bookmarks_state_projections_preserve_snapshots_and_equal_keys(static_page):
+    result = static_page.evaluate(
+        """async () => {
+          const { createBookmarksModel, sortUrls, visibleGroups, treeGroups } =
+            await import('/static/features/bookmarks/model.js');
+          const model = createBookmarksModel();
+          const empty = model.server.groups.length;
+          const url = id => Object.freeze({id, url: `https://same.example/${id}`,
+            title: null, created_at: '2026-09-05T00:00:00Z', important: false, version: 1});
+          const first = url(1), second = url(2);
+          const group = (id, nsfw, urls, children = []) => Object.freeze({
+            id, name: id === 1 ? 'default' : `Group ${id}`, parent_id: null,
+            position: id, depth: 1, nsfw, domains: Object.freeze([]),
+            urls: Object.freeze(urls), children: Object.freeze(children)});
+          const hidden = group(3, true, [second]);
+          const root = group(1, false, [first, second], [hidden]);
+          const duplicate = group(2, false, [first]);
+          const snapshot = Object.freeze([root, duplicate]);
+          model.replaceGroups(snapshot);
+          model.setSortMode('domain');
+          model.setSafeMode(true);
+          const ties = sortUrls(root.urls, model.ui.sortMode);
+          const safe = visibleGroups(root.children, model.ui.safeMode);
+          model.setSafeMode(false);
+          const all = visibleGroups(root.children, model.ui.safeMode);
+          const unchanged = model.server.groups === snapshot && root.urls[0] === first;
+          const memberships = treeGroups(model.server.groups)
+            .flatMap(({group}) => group.urls).filter(item => item.id === 1);
+          model.replaceGroups([root]);
+          const single = treeGroups(model.server.groups).map(({group}) => group.id);
+          model.clearGroups();
+          model.setSortMode('added-asc');
+          model.setSafeMode(true);
+          return {empty, ties: ties.map(item => item.id), same: ties[0] === first,
+            safe: safe.length, all: all.length, unchanged,
+            memberships: memberships.length, sharedIdentity: memberships[0] === memberships[1],
+            single, cleared: model.server.groups.length};
+        }"""
+    )
+    assert result == {
+        "empty": 0,
+        "ties": [1, 2],
+        "same": True,
+        "safe": 0,
+        "all": 1,
+        "unchanged": True,
+        "memberships": 2,
+        "sharedIdentity": True,
+        "single": [1, 3],
+        "cleared": 0,
+    }
+
+
 class RecordingTitleFetcher:
     def __init__(self, title):
         self.title = title
@@ -380,6 +501,41 @@ def test_frontend_deletes_url(app, page):
     expect(page.locator("#url-count")).to_have_text("1 saved")
     expect(page.get_by_role("link", name="one.example")).to_have_count(0)
     assert bookmark_helpers.saved_urls() == ["https://two.example"]
+
+
+def test_frontend_repeated_confirmation_escape_restores_focus(app, page):
+    base_url, _ = app
+    bookmark_helpers.seed_url("https://one.example")
+    bookmark_helpers.seed_url("https://two.example")
+    page.goto(base_url)
+    page.get_by_role("button", name="Delete one.example").click()
+    page.locator("#confirm-dialog").get_by_role("button", name="Delete").click()
+    expect(page.locator("#url-count")).to_have_text("1 saved")
+    button = page.get_by_role("button", name="Delete two.example")
+    for _ in range(3):
+        button.click()
+        page.keyboard.press("Escape")
+        expect(page.locator("#confirm-dialog")).not_to_be_visible()
+        expect(button).to_be_focused()
+        expect(page.locator("#url-count")).to_have_text("1 saved")
+    button.click()
+    page.locator("#confirm-dialog").get_by_role("button", name="Cancel").click()
+    expect(button).to_be_focused()
+    assert bookmark_helpers.saved_urls() == ["https://two.example"]
+
+
+def test_dialog_factory_disposes_pending_confirmation(static_page):
+    assert static_page.evaluate("""async () => {
+      const {createDialogs} = await import('/static/shell/dialogs.js');
+      const root = document.createElement('section');
+      root.innerHTML = '<dialog id="confirm-dialog"><p id="confirm-url"></p></dialog>';
+      document.body.append(root);
+      const dialogs = createDialogs(root);
+      const first = dialogs.confirmDeletion('https://one.example');
+      const duplicate = dialogs.confirmDeletion('https://two.example');
+      dialogs.dispose();
+      return [await first, await duplicate, root.querySelector('dialog').open];
+    }""") == [False, False, False]
 
 
 def test_frontend_delete_immediately_skips_confirmation(app, page):

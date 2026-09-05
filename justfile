@@ -54,7 +54,10 @@ audit:
 check-imports:
     uv run lint-imports
 
-check: check-api-types check-frontend-artifacts check-imports lint format-check typecheck test
+check-frontend-imports:
+    npm run check:imports
+
+check: check-api-types check-frontend-artifacts check-imports check-frontend-imports lint format-check typecheck test
 
 check-all: check audit
 
@@ -76,22 +79,18 @@ check-api-types:
     diff -u web/src/generated/openapi.d.ts "$tmpdir/openapi.d.ts"
 
 check-frontend-artifacts:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tmpdir="$(mktemp -d)"
-    cleanup() {
-        rm -rf "$tmpdir"
-    }
-    trap cleanup EXIT
-    npm run build -- --outDir "$tmpdir"
-    diff -u web/static/api.js "$tmpdir/api.js"
-    diff -u web/static/app.js "$tmpdir/app.js"
+    node scripts/check_frontend_artifacts.cjs
 
 typecheck-frontend:
     npm run typecheck
 
 build-frontend:
     npm run build
+
+# Local synthetic component overview; no application or database is started.
+design-mode: build-frontend
+    @echo "http://127.0.0.1:8001/design.html"
+    uv run python -m http.server 8001 --bind 127.0.0.1 --directory web
 
 test-api:
     uv run pytest tests/api

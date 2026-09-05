@@ -22,7 +22,8 @@ infrastructure repository.
 - `trellmark/` — web application, API, authentication, storage, and metadata.
 - `migrations/` — one fresh PostgreSQL baseline.
 - `web/src/` — TypeScript source and generated OpenAPI types.
-- `web/static/` — committed browser output included in the application image.
+- `web/html/` — maintained page and shared fragment sources.
+- `web/static/` — committed browser output; dedicated `design/` assets are local-only.
 - `deploy/` — the Trellmark image and rootless Podman Quadlet units.
 - `doc/` — architecture decision records and README media.
 - `tests/` — API, browser, schema, security, and deployment-contract tests.
@@ -68,15 +69,77 @@ just run-container
 
 ## Validate changes
 
+### Design mode
+
+With the locked development dependencies installed, run `just design-mode` and
+open `http://127.0.0.1:8001/design.html`. The command builds the frontend, then
+serves only `web` on loopback in the foreground. It needs no application
+configuration, login, PostgreSQL, or personal data. An occupied port fails
+visibly; stop the foreground command with Ctrl-C to release it.
+
+The overview uses real shared views, HTML fragments and application styles with
+synthetic data. Folding groups, toggling importance and opening dialogs affect
+only that page; reload resets the examples. Inspect appearance manually after
+the frontend phase is complete; automated DOM/behavior, contrast and overflow
+checks remain part of validation.
+
+Edit TypeScript in `web/src/` and HTML in `web/html/`, then use
+`just build-frontend` to regenerate JavaScript and complete pages. The design
+frame stylesheet `web/static/design/frame.css` is maintained separately; all
+design JavaScript and `web/design.html` are generated and drift-checked.
+Production image staging excludes the design page and the entire dedicated
+`static/design/` tree before copying application assets into runtime layers.
+
+### Checks
+
 ```bash
 npm ci
 uv run playwright install chromium
 just check
 ```
 
-The test harness starts an isolated PostgreSQL container. `just check` verifies
-generated OpenAPI declarations and browser JavaScript, Python and TypeScript
-types, formatting, security boundaries, API behavior, and browser behavior.
+The test harness starts an isolated PostgreSQL 18 container. `just check` verifies
+generated OpenAPI declarations, complete generated HTML/JavaScript trees, native
+frontend and backend import boundaries, Python and TypeScript types, formatting,
+security, API and browser behavior, including contrast and narrow-view overflow.
+CI runs the same gates with Node.js 24, Python 3.14 and uv 0.12.3.
+
+### Browser ownership and generated files
+
+`web/src/main.ts` composes the public `shell/index.ts` and
+`features/bookmarks/index.ts` factories with the `api/client.ts` adapter and
+shared primitives. The shell owns authentication, private-state invalidation,
+dialog lifecycle and import/export. Bookmarks owns its read-only model
+projections, views, editor fields and drag operations; it receives dialog/error
+capabilities without importing the shell. `shared/` stays product-neutral and
+imports only shared modules. Generated OpenAPI declarations are consumed only
+through the API adapter using type-only imports.
+
+`web/src/design/main.ts` is the other named composition entry. It reuses public
+Bookmark views and shell dialogs with in-memory fixtures. Other design modules
+cannot compose feature/shell internals or start API operations. Imports of
+reusable modules acquire no page handles or listeners; factories own setup and
+disposal. See [ADR 0001](doc/adr/0001-framework-free-frontend.md) for the decision,
+its dated baseline and the criteria for reconsidering a framework.
+
+Maintain complete-page sources and shared fragments under `web/html/`; generated
+`web/index.html` and `web/design.html` contain all markup without runtime fragment
+requests. `just build-frontend` compiles every configured TypeScript source,
+including modules unreachable from either entry, and publishes the complete
+output. Regenerate before committing source changes. `just check-frontend-artifacts`
+compares every generated path and byte against a fresh temporary build without
+cleaning or repairing the published tree; missing, stale and corrupted files fail.
+The exact maintained exclusions are `web/static/styles.css`,
+`web/static/icons.svg`, `web/static/favicon.svg`, `web/static/favicon.ico`,
+`web/static/apple-touch-icon.png`, `web/static/fonts/` and
+`web/static/design/frame.css`.
+No extension-wide CSS or JavaScript exclusion exists.
+
+Run `just check-frontend-imports` (`npm run check:imports`) for the native
+TypeScript dependency rules and `just check-api-types` for generated API drift.
+These checks and `just check-frontend-artifacts` run locally and in CI. Final
+phase regression and local production-image proof are recorded in the
+[Phase 3 evidence](.planning/phases/03-frontend-boundaries-and-deterministic-build/03-14-EVIDENCE.md).
 
 ## GSD workflow
 

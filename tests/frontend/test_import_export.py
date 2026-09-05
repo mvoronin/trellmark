@@ -39,6 +39,65 @@ def _write_import_file(tmp_path, filename, *, group_name="Reading"):
     return import_file
 
 
+def test_backup_factory_clear_preserves_new_request_ownership(static_page):
+    assert static_page.evaluate("""async () => {
+      const {createBackupControls} = await import('/static/shell/backup.js');
+      const {createRequestLifetime} = await import('/static/shared/request.js');
+      const root = document.createElement('section');
+      root.innerHTML = '<button id="export-button"></button>'
+        + '<input type="file" id="import-input">'
+        + '<button id="import-retry-button"></button>';
+      document.body.append(root);
+      const privateLifetime = createRequestLifetime();
+      const releases = [];
+      const statuses = [];
+      const replacements = [];
+      let finish;
+      const completed = new Promise(resolve => { finish = resolve; });
+      let requests = 0;
+      window.fetch = async () => {
+        requests++;
+        return new Response(JSON.stringify({groups: [], imported: 1, skipped: 0}),
+          {status: 200, headers: {'Content-Type': 'application/json'}});
+      };
+      const controls = createBackupControls(root, {
+        privateLifetime,
+        refreshGroups: () => new Promise(resolve => releases.push(resolve)),
+        replaceGroups: groups => replacements.push(groups),
+        setStatus: message => {
+          statuses.push(message);
+          if (message) finish();
+        },
+      });
+      const input = root.querySelector('input');
+      function choose(name) {
+        const transfer = new DataTransfer();
+        transfer.items.add(new File(['{}'], name));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change'));
+      }
+      const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+      choose('old.json');
+      privateLifetime.invalidate();
+      controls.clear();
+      const cleared = input.files.length === 0;
+      choose('new.json');
+      releases[0]();
+      await tick();
+      const guarded = input.disabled && input.files[0].name === 'new.json'
+        && requests === 0 && replacements.length === 0;
+      releases[1]();
+      await completed;
+      await tick();
+      const succeeded = !input.disabled && input.files.length === 0
+        && replacements.length === 1 && statuses.at(-1) === 'Imported 1, skipped 0.';
+      controls.dispose();
+      choose('disposed.json');
+      await tick();
+      return [cleared, guarded, succeeded, requests, releases.length];
+    }""") == [True, True, True, 1, 2]
+
+
 def test_frontend_exports_json_file(app, page):
     base_url, _ = app
     reading = bookmark_helpers.seed_group("Reading")

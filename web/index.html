@@ -14,7 +14,7 @@
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
     <!-- Pin the saved theme before first paint so an explicit light/dark
          choice doesn't flash the wrong colors. "system" needs nothing here —
-         color-scheme follows the OS. app.js keeps the toggle in sync. -->
+         color-scheme follows the OS. main.js keeps the toggle in sync. -->
     <script>
       try {
         const stored = localStorage.getItem("theme");
@@ -29,7 +29,7 @@
     <link rel="preload" href="/static/fonts/golostext-400-700-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/ptsansnarrow-700-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/app.js" type="module"></script>
+    <script src="/static/main.js" type="module"></script>
   </head>
   <body>
     <section id="session-pending" class="auth-shell" aria-live="polite">
