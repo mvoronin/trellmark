@@ -10,6 +10,7 @@ export interface BookmarkDragOperations {
   replace(groups: readonly BookmarkGroup[]): void;
   load(): Promise<void>;
   status(message: string, state?: string): void;
+  moveUrl?(id: number, sourceGroupId: number, targetGroupId: number, select: HTMLSelectElement): void;
 }
 
 export function createBookmarkDrag(groupsContainer: HTMLElement, operations: BookmarkDragOperations) {
@@ -17,12 +18,90 @@ export function createBookmarkDrag(groupsContainer: HTMLElement, operations: Boo
     replace: replaceGroups, load: loadGroups, status: setStatus } = operations;
   const listeners = new AbortController();
   let disposed = false;
+  let urlDrag: {
+    handle: HTMLElement; item: HTMLElement; select: HTMLSelectElement;
+    id: number; sourceGroupId: number; pointerId: number;
+    startX: number; startY: number; moving: boolean; targetId: number | null;
+  } | null = null;
 
   // Reorder groups by dragging a title line. This uses Pointer Events rather than
   // the HTML5 drag-and-drop API so a single path works for mouse, touch (Android),
   // and pen. The header carries touch-action: none so a touch-drag reorders
   // instead of scrolling the page.
   const DRAG_THRESHOLD = 6; // px of movement before a press becomes a drag
+
+  function makeUrlDraggable(
+    handle: HTMLElement, item: HTMLElement, id: number,
+    sourceGroupId: number, select: HTMLSelectElement,
+  ): void {
+    handle.addEventListener("pointerdown", (event) => {
+      if (disposed || urlDrag || bookmarks.ui.activeDrag || select.disabled
+        || event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      urlDrag = { handle, item, id, sourceGroupId, select, pointerId: event.pointerId,
+        startX: event.clientX, startY: event.clientY, moving: false, targetId: null };
+      handle.setPointerCapture(event.pointerId);
+      handle.addEventListener("pointermove", onUrlMove);
+      handle.addEventListener("pointerup", onUrlEnd);
+      handle.addEventListener("pointercancel", cancelUrlDrag);
+      handle.addEventListener("lostpointercapture", cancelUrlDrag);
+    }, { signal: listeners.signal });
+  }
+
+  function onUrlMove(event: PointerEvent): void {
+    if (!urlDrag || event.pointerId !== urlDrag.pointerId) return;
+    if (!urlDrag.moving && Math.hypot(event.clientX - urlDrag.startX,
+      event.clientY - urlDrag.startY) < DRAG_THRESHOLD) return;
+    urlDrag.moving = true;
+    urlDrag.item.classList.add("url-dragging");
+    event.preventDefault();
+    updateUrlTarget(event.clientX, event.clientY);
+  }
+
+  function updateUrlTarget(x: number, y: number): void {
+    if (!urlDrag) return;
+    clearDropIndicators();
+    urlDrag.targetId = null;
+    const section = groupsContainer.ownerDocument.elementFromPoint(x, y)?.closest<HTMLElement>(".group");
+    if (!section || !groupsContainer.contains(section)) return;
+    const header = section.querySelector<HTMLElement>(":scope > .group-header");
+    const id = Number(header?.dataset.groupId);
+    if (!header || !Number.isInteger(id) || id === urlDrag.sourceGroupId) return;
+    urlDrag.targetId = id;
+    header.classList.add("drag-over");
+  }
+
+  function onUrlEnd(event: PointerEvent): void {
+    if (!urlDrag || event.pointerId !== urlDrag.pointerId) return;
+    updateUrlTarget(event.clientX, event.clientY);
+    const { id, sourceGroupId, targetId, select, moving } = urlDrag;
+    cancelUrlDrag();
+    if (moving && targetId !== null && !select.disabled) {
+      operations.moveUrl?.(id, sourceGroupId, targetId, select);
+    }
+  }
+
+  function cancelUrlDrag(): void {
+    if (!urlDrag) return;
+    const { handle, item, pointerId } = urlDrag;
+    urlDrag = null;
+    handle.removeEventListener("pointermove", onUrlMove);
+    handle.removeEventListener("pointerup", onUrlEnd);
+    handle.removeEventListener("pointercancel", cancelUrlDrag);
+    handle.removeEventListener("lostpointercapture", cancelUrlDrag);
+    if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+    item.classList.remove("url-dragging");
+    clearDropIndicators();
+  }
+
+  function cancel(): void {
+    cancelUrlDrag();
+    finishDrag();
+  }
+
+  groupsContainer.ownerDocument.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") cancel();
+  }, { signal: listeners.signal });
 
   function makeHeaderDraggable(
     header: HTMLElement,
@@ -33,7 +112,7 @@ export function createBookmarkDrag(groupsContainer: HTMLElement, operations: Boo
     header.addEventListener("pointerdown", (event) => {
       // Only the primary button/finger, and never when the press starts on the
       // fold toggle (that stays a plain click).
-      if (disposed || bookmarks.ui.activeDrag || event.button !== 0 || !event.isPrimary) {
+      if (disposed || urlDrag || bookmarks.ui.activeDrag || event.button !== 0 || !event.isPrimary) {
         return;
       }
       if (event.target instanceof Element && event.target.closest("button")) {
@@ -209,10 +288,10 @@ export function createBookmarkDrag(groupsContainer: HTMLElement, operations: Boo
   }
 
   return {
-    makeHeaderDraggable, cancel: finishDrag,
+    makeHeaderDraggable, makeUrlDraggable, cancel,
     dispose(): void {
       disposed = true;
-      finishDrag();
+      cancel();
       listeners.abort();
     },
   };

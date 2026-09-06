@@ -144,6 +144,13 @@ export function renderUrlItem(record, currentGroup, groups, options) {
     }, [icon("trash-2")]);
     remove.addEventListener("click", () => options.actions.requestDelete?.(record, currentGroupId, remove));
     const controls = h("div", { className: "url-controls" }, [importantToggle, edit, refreshMetadata, move, remove]);
+    if (options.actions.makeUrlDraggable) {
+        const handle = h("span", {
+            className: "url-drag-handle", title: "Drag to another group", aria: { hidden: true },
+        }, ["⠿"]);
+        controls.prepend(handle);
+        options.actions.makeUrlDraggable(handle, item, id, currentGroupId, move);
+    }
     item.append(main, controls);
     return item;
 }

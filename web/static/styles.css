@@ -990,6 +990,25 @@ body {
   background: color-mix(in oklab, var(--important) 12%, var(--surface));
 }
 
+.url-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  min-height: 2rem;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.url-dragging {
+  outline: var(--rule) dashed var(--border-strong);
+}
+
+.url-dragging .url-drag-handle {
+  cursor: grabbing;
+}
+
 .url-main {
   display: grid;
   grid-template-columns: 1.25rem minmax(0, 1fr);

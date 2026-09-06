@@ -6,7 +6,7 @@ status: complete
 stopped_at: Milestone v0.0.1 archived after Phase 03; Notes MVP deferred
 last_updated: "2026-09-06T00:00:00.000Z"
 last_activity: 2026-09-06
-last_activity_desc: Milestone v0.0.1 archived after Phase 03; Notes MVP deferred
+last_activity_desc: Completed quick task 260906-fh6 - Add link dragging between groups
 state_head: 64d308e26a440d335c7b59462f9fd5a471ba7c68
 progress:
   total_phases: 3
@@ -31,7 +31,7 @@ Phase: None — milestone archived
 Plan: Not started
 Completed plans in current phase: 0 (not yet planned)
 Status: Milestone archived at user request after Phase 03 completion
-Last activity: 2026-09-06 — milestone v0.0.1 archived after Phase 03; Notes MVP deferred
+Last activity: 2026-09-06 — Completed quick task 260906-fh6: Add link dragging between groups
 
 Progress: [██████████] 100% of the archived milestone scope
 
@@ -120,6 +120,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260830-iif | Add a filesystem-safe UTC timestamp to exported-data filenames while preserving the export format and behavior. | 2026-08-30 | 248ccc8 | [260830-iif-add-a-filesystem-safe-utc-timestamp-to-e](./quick/260830-iif-add-a-filesystem-safe-utc-timestamp-to-e/) |
+| 260906-fh6 | Add link dragging between groups. | 2026-09-06 | c379c9c | [260906-fh6-add-link-dragging-between-groups](./quick/260906-fh6-add-link-dragging-between-groups/) |
 
 ### Roadmap Evolution
 
