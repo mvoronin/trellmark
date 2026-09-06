@@ -54,6 +54,7 @@ export function createBookmarks(root: ParentNode, options: BookmarksOptions) {
   const drag = createBookmarkDrag(groupsContainer, {
     model: bookmarks, privateLifetime, reorder: api.reorderGroups,
     replace: replaceGroups, load: loadGroups, status: setStatus,
+    moveUrl: editors.moveUrl,
   });
 
   function replaceGroups(nextGroups: readonly BookmarkGroup[]): void {
@@ -64,9 +65,11 @@ export function createBookmarks(root: ParentNode, options: BookmarksOptions) {
   }
 
   function renderGroups(): void {
+    drag.cancel();
     renderBookmarkGroups(groupsContainer, count, bookmarks.server.groups, bookmarks.ui, {
       iconSource: (record) => api.siteIconPath(record.id),
-      actions: { ...editors, toggleFold, makeHeaderDraggable: drag.makeHeaderDraggable },
+      actions: { ...editors, toggleFold, makeHeaderDraggable: drag.makeHeaderDraggable,
+        makeUrlDraggable: drag.makeUrlDraggable },
     });
     editors.syncCreateParentSelect();
   }

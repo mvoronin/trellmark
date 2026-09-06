@@ -6,6 +6,7 @@ import { sortUrls, treeGroups, visibleGroups, type BookmarkGroup, type BookmarkU
 export interface BookmarkViewActions {
   toggleFold?(groupId: number, toggle: HTMLButtonElement, content: HTMLDivElement): void;
   makeHeaderDraggable?(header: HTMLElement, section: HTMLElement, groupId: number, parentId: number | null): void;
+  makeUrlDraggable?(handle: HTMLElement, item: HTMLElement, id: number, sourceGroupId: number, select: HTMLSelectElement): void;
   showGroupEditor?(group: BookmarkGroup): void;
   requestGroupDelete?(group: BookmarkGroup): void;
   toggleImportant?(id: number, important: boolean, button: HTMLButtonElement): void;
@@ -204,6 +205,13 @@ export function renderUrlItem(record: BookmarkUrl, currentGroup: BookmarkGroup, 
   );
 
   const controls = h("div", { className: "url-controls" }, [importantToggle, edit, refreshMetadata, move, remove]);
+  if (options.actions.makeUrlDraggable) {
+    const handle = h("span", {
+      className: "url-drag-handle", title: "Drag to another group", aria: { hidden: true },
+    }, ["⠿"]);
+    controls.prepend(handle);
+    options.actions.makeUrlDraggable(handle, item, id, currentGroupId, move);
+  }
 
   item.append(main, controls);
   return item;

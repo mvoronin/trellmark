@@ -191,7 +191,7 @@ def test_format_helpers_are_dom_independent(static_page):
     ]
 
 
-def test_live_group_and_url_child_order_is_unchanged(app, page):
+def test_live_group_and_url_child_order_includes_drag_handle(app, page):
     base_url, _ = app
     bookmark_helpers.seed_group("Reading", domains=["example.test"])
     bookmark_helpers.seed_url("https://example.test", title="A title")
@@ -212,6 +212,7 @@ def test_live_group_and_url_child_order_is_unchanged(app, page):
     assert group.locator(".url-controls").evaluate(
         "element => [...element.children].map(child => child.className)"
     ) == [
+        "url-drag-handle",
         "important-toggle",
         "url-action edit-url-button",
         "url-action refresh-metadata-button",

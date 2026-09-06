@@ -7,6 +7,12 @@ links in nested groups with titles, importance flags, domain rules,
 safe/private visibility, and site icons. First-class notes are the next major
 product capability.
 
+Move a link by dragging its dotted handle onto another group's header or
+contents. Mouse, touch, and pen use the same gesture; Escape cancels it.
+Empty and folded groups accept drops. The move selector also supports keyboard
+use. Moving changes only the source membership and preserves other groups
+containing the same link.
+
 The application is one self-contained FastAPI service backed by PostgreSQL.
 The service owns both the JSON API and the vanilla TypeScript SPA. Public TLS
 and routing belong to one shared Caddy instance maintained in a separate
