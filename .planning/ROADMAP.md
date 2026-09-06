@@ -1,4 +1,12 @@
-# Roadmap: Trellmark Notes MVP
+# Roadmap: Trellmark
+
+## Archived milestone
+
+- [x] **v0.0.1: Trellmark Foundations** — Phases 1–3 complete; archived as an override closeout. [Archive](milestones/v0.0.1-ROADMAP.md)
+
+## Backlog
+
+The Notes MVP is deferred with minimal priority. Phases 4–6 remain future work and are not active.
 
 ## Overview
 
@@ -305,6 +313,6 @@ Phases execute in strict numeric order: 1 → 2 → 3 → 4 → 5 → 6. Issue #
 | 1. Atomic Bookmark Import | 4/4 | Complete    | 2026-08-30 |
 | 2. Backend Modular Monolith | 22/22 | Complete    | 2026-09-05 |
 | 3. Frontend Boundaries and Deterministic Build | 14/14 | Complete    | 2026-09-05 |
-| 4. Notes Domain, Schema, and API | 0/TBD | Not started | - |
-| 5. Notes Browser Experience and Safe Markdown | 0/TBD | Not started | - |
-| 6. Cross-Domain Backup and Release Gate | 0/TBD | Not started | - |
+| 4. Notes Domain, Schema, and API | 0/TBD | Deferred | - |
+| 5. Notes Browser Experience and Safe Markdown | 0/TBD | Deferred | - |
+| 6. Cross-Domain Backup and Release Gate | 0/TBD | Deferred | - |

@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
-current_phase: 4
-current_phase_name: Notes Domain, Schema, and API
-status: planning
-stopped_at: Phase 03 complete; PR prepared on phase-3-frontend; Phases 4 and 5 deferred
-last_updated: "2026-09-05T19:57:57.591Z"
-last_activity: 2026-09-05
-last_activity_desc: Phase 03 complete; PR prepared on phase-3-frontend; Phases 4 and 5 deferred
+current_phase: null
+current_phase_name: None (milestone v0.0.1 archived)
+status: complete
+stopped_at: Milestone v0.0.1 archived after Phase 03; Notes MVP deferred
+last_updated: "2026-09-06T00:00:00.000Z"
+last_activity: 2026-09-06
+last_activity_desc: Milestone v0.0.1 archived after Phase 03; Notes MVP deferred
 state_head: 64d308e26a440d335c7b59462f9fd5a471ba7c68
 progress:
-  total_phases: 6
+  total_phases: 3
   completed_phases: 3
   total_plans: 40
   completed_plans: 40
-  percent: 50
+  percent: 100
 ---
 
 # Project State
@@ -23,17 +23,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05)
 
 **Core value:** A single user can safely organize durable personal knowledge as bookmarks and Markdown notes without losing data or exposing private content.
-**Current focus:** Phase 04 — Notes Domain, Schema, and API
+**Current focus:** No active phase; milestone v0.0.1 archived
 
 ## Current Position
 
-Phase: 4 — Notes Domain, Schema, and API
+Phase: None — milestone archived
 Plan: Not started
 Completed plans in current phase: 0 (not yet planned)
-Status: Paused at user request after Phase 03 completion
-Last activity: 2026-09-05 — Phase 03 complete; PR prepared on phase-3-frontend; Phases 4 and 5 deferred
+Status: Milestone archived at user request after Phase 03 completion
+Last activity: 2026-09-06 — milestone v0.0.1 archived after Phase 03; Notes MVP deferred
 
-Progress: [█████░░░░░] 50%
+Progress: [██████████] 100% of the archived milestone scope
 
 ## Performance Metrics
 

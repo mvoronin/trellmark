@@ -1,7 +1,9 @@
-# Requirements: Trellmark Notes MVP
+# Requirements backlog: Trellmark Notes MVP (deferred)
 
 **Defined:** 2026-08-29
 **Core Value:** A single user can safely organize durable personal knowledge as bookmarks and Markdown notes without losing data or exposing private content.
+
+The Notes MVP is deferred with minimal priority. The validated Phase 1–3 requirements are archived in `milestones/v0.0.1-REQUIREMENTS.md`; unchecked requirements below remain future backlog work.
 
 ## v1 Requirements
 

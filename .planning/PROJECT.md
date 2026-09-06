@@ -27,7 +27,7 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 
 ### Active
 
-- [ ] Add Notes as an independent domain with a dedicated `/notes/` page and a separate ordered group hierarchy up to three levels deep, including a protected default `Inbox` (GitHub Issue #1)
+- [ ] Future work (minimal priority): Add Notes as an independent domain with a dedicated `/notes/` page and a separate ordered group hierarchy up to three levels deep, including a protected default `Inbox` (GitHub Issue #1)
 - [ ] Let the user create, view, edit, move, and delete notes and note groups; each note has a title, raw Markdown body, created/updated timestamps, and optimistic version protection
 - [ ] Ensure stale note edits never overwrite newer content or discard the user's local draft
 - [ ] Render Markdown through safe DOM construction without `innerHTML`, executable/raw HTML, scripts, images, or unsafe URL schemes
@@ -92,6 +92,14 @@ A single user can safely organize durable personal knowledge as bookmarks and Ma
 | Retain private request ownership until logout succeeds | Failed logout must not discard in-progress results or strand controls; actual cleanup/expiry still invalidates before clearing private content | ✓ Phase 3 review repair |
 
 ## Evolution
+
+### Current State
+
+Milestone `v0.0.1` is archived after Phase 3. The implemented bookmark safety, backend modular monolith, and frontend boundary work is on `main`. Notes MVP work is deferred.
+
+### Next Milestone Goals
+
+To be defined from the next user-prioritized task. Notes MVP remains backlog work with minimal priority.
 
 This document evolves at phase transitions and milestone boundaries.
 
