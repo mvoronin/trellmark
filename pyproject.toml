@@ -17,7 +17,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "basedpyright>=1.39.9",
-    "import-linter==2.14",
+    "import-linter==2.15",
     "playwright>=1.52",
     "pytest>=8.0",
     "ruff>=0.11",
