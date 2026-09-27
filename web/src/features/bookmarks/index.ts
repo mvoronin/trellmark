@@ -68,7 +68,7 @@ export function createBookmarks(root: ParentNode, options: BookmarksOptions) {
     drag.cancel();
     renderBookmarkGroups(groupsContainer, count, bookmarks.server.groups, bookmarks.ui, {
       iconSource: (record) => api.siteIconPath(record.id),
-      actions: { ...editors, toggleFold, makeHeaderDraggable: drag.makeHeaderDraggable,
+      actions: { ...editors, toggleFold, makeGroupDraggable: drag.makeGroupDraggable,
         makeUrlDraggable: drag.makeUrlDraggable },
     });
     editors.syncCreateParentSelect();

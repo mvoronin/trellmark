@@ -8,9 +8,12 @@ from tests.postgres import TEST_LOGIN, TEST_PASSWORD
 
 
 @pytest.mark.parametrize("completion_owner", ["disposed", "private-clear"])
-def test_drag_factory_cancel_dispose_and_foreign_targets(static_page, completion_owner):
+@pytest.mark.parametrize("pointer_type", ["mouse", "pen"])
+def test_drag_factory_cancel_dispose_and_foreign_targets(
+    static_page, completion_owner, pointer_type
+):
     result = static_page.evaluate(
-        """async completionOwner => {
+        """async ({completionOwner, pointerType}) => {
           const { createBookmarkDrag } = await import('/static/features/bookmarks/drag.js');
           const { createBookmarksModel } = await import('/static/features/bookmarks/model.js');
           const { createRequestLifetime } = await import('/static/shared/request.js');
@@ -22,7 +25,9 @@ def test_drag_factory_cancel_dispose_and_foreign_targets(static_page, completion
             const section = document.createElement('section');
             const header = document.createElement('header');
             header.className = 'group-header'; header.dataset.groupId = String(id);
-            header.dataset.parentId = ''; section.append(header); return {header, section};
+            header.dataset.parentId = '';
+            const handle = document.createElement('span'); header.append(handle);
+            section.append(header); return {handle, header, section};
           };
           const first = make(1), second = make(2), foreign = make(2);
           root.append(first.section, second.section); document.body.append(root, foreign.section);
@@ -37,9 +42,11 @@ def test_drag_factory_cancel_dispose_and_foreign_targets(static_page, completion
           const drag = createBookmarkDrag(root, { model, privateLifetime,
             reorder: () => { calls++; return new Promise(resolve => { complete = resolve; }); },
             replace: () => { replacements++; }, load: async () => {}, status: () => {} });
-          drag.makeHeaderDraggable(first.header, first.section, 1, null);
-          const send = type => first.header.dispatchEvent(new PointerEvent(type,
-            {pointerId: 1, isPrimary: true, button: 0, clientX: type === 'pointerdown' ? 0 : 20, clientY: 35}));
+          drag.makeGroupDraggable(first.handle, first.header, first.section, 1, null);
+          const send = type => (type === 'pointerdown' ? first.handle : first.header)
+            .dispatchEvent(new PointerEvent(type,
+            {pointerId: 1, pointerType, isPrimary: true, button: 0,
+              clientX: type === 'pointerdown' ? 0 : 20, clientY: 35}));
           send('pointerdown'); send('pointermove');
           const moving = captured && first.section.classList.contains('dragging');
           send('pointercancel');
@@ -54,7 +61,7 @@ def test_drag_factory_cancel_dispose_and_foreign_targets(static_page, completion
           send('pointerdown');
           return {moving, cancelled, forbidden, calls, replacements, disposed: model.ui.activeDrag === null};
         }""",
-        completion_owner,
+        {"completionOwner": completion_owner, "pointerType": pointer_type},
     )
     assert result == {
         "moving": True,
@@ -70,6 +77,10 @@ def group_header(page, name):
     return page.locator(
         ".group-header", has=page.get_by_role("heading", name=name, exact=True)
     )
+
+
+def group_handle(page, name):
+    return group_header(page, name).locator(".group-drag-handle")
 
 
 def _drag_points(source, target, y_fraction):
@@ -118,7 +129,9 @@ def test_drag_keeps_captured_header_and_folded_descendants_during_movement(app, 
       header.addEventListener('pointerdown', event => { window.dragPointer = event.pointerId; },
         {once: true});
     }""")
-    mouse_drag_over(page, source, group_header(page, "Other"), y_fraction=0.85)
+    mouse_drag_over(
+        page, group_handle(page, "Parent"), group_header(page, "Other"), y_fraction=0.85
+    )
     assert source.evaluate("""header => header === window.capturedHeader &&
       header.isConnected && header.hasPointerCapture(window.dragPointer)""")
     expect(page.get_by_role("heading", name="Grandchild", exact=True)).to_be_hidden()
@@ -132,7 +145,7 @@ def test_drag_keeps_captured_header_and_folded_descendants_during_movement(app, 
     ).to_have_attribute("aria-expanded", "false")
 
 
-def touch_drag(page, source, target, y_fraction=0.15):
+def touch_drag(page, source, target, y_fraction=0.15, *, before_release=None):
     (sx, sy), (ex, ey) = _drag_points(source, target, y_fraction)
     client = page.context.new_cdp_session(page)
     client.send(
@@ -156,6 +169,8 @@ def touch_drag(page, source, target, y_fraction=0.15):
             "touchPoints": [{"x": ex, "y": ey}],
         },
     )
+    if before_release is not None:
+        before_release()
     client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
     client.detach()
 
@@ -171,7 +186,7 @@ def test_frontend_reorders_groups_by_drag(app, page):
     expect(page.locator(".group-name")).to_have_text(["default", "Reading", "Work"])
 
     # Drop Work onto the top of the default header so it lands first.
-    mouse_drag(page, group_header(page, "Work"), group_header(page, "default"))
+    mouse_drag(page, group_handle(page, "Work"), group_header(page, "default"))
 
     expect(page.locator("#form-status")).to_have_text("Reordered.")
     expect(page.locator(".group-name")).to_have_text(["Work", "default", "Reading"])
@@ -204,7 +219,7 @@ def test_frontend_reorders_groups_by_touch(app, browser):
         page.get_by_role("button", name="Log in").click()
         expect(page.locator(".group-name")).to_have_text(["default", "Reading", "Work"])
 
-        touch_drag(page, group_header(page, "Work"), group_header(page, "default"))
+        touch_drag(page, group_handle(page, "Work"), group_header(page, "default"))
 
         expect(page.locator("#form-status")).to_have_text("Reordered.")
         expect(page.locator(".group-name")).to_have_text(["Work", "default", "Reading"])
@@ -231,7 +246,7 @@ def test_frontend_reorder_error_reloads_server_order(app, page):
         ),
     )
 
-    mouse_drag(page, group_header(page, "Reading"), group_header(page, "default"))
+    mouse_drag(page, group_handle(page, "Reading"), group_header(page, "default"))
 
     expect(page.locator("#form-status")).to_have_text("Invalid group order.")
     # The rejected move is dropped and the server's order is shown.
@@ -262,7 +277,7 @@ def test_frontend_reorders_only_within_the_dragged_groups_parent(app, page):
 
     # A sibling drop marks its target. Asserting that here is what gives the
     # cross-parent check below something to be the absence of.
-    mouse_drag_over(page, group_header(page, "Second"), group_header(page, "First"))
+    mouse_drag_over(page, group_handle(page, "Second"), group_header(page, "First"))
     expect(page.locator(".group-header.drag-over .group-name")).to_have_text("First")
     page.mouse.up()
 
@@ -273,7 +288,7 @@ def test_frontend_reorders_only_within_the_dragged_groups_parent(app, page):
     }
 
     request_count = len(requests)
-    mouse_drag_over(page, group_header(page, "Second"), group_header(page, "Other"))
+    mouse_drag_over(page, group_handle(page, "Second"), group_header(page, "Other"))
     # Checked mid-drag: pointerup clears every indicator, so the same assertion
     # after the drop cannot tell "never marked" from "marked, then cleared".
     expect(page.locator(".group-header.drag-over")).to_have_count(0)
@@ -285,7 +300,7 @@ def test_frontend_reorders_only_within_the_dragged_groups_parent(app, page):
     # sibling drop that must send, then assert it is the only request that
     # arrived: anything the cross-parent drop queued precedes it in the stream.
     with page.expect_request("**/api/groups/order") as pending:
-        mouse_drag(page, group_header(page, "First"), group_header(page, "Second"))
+        mouse_drag(page, group_handle(page, "First"), group_header(page, "Second"))
     delivered = pending.value.post_data_json
 
     assert delivered == {

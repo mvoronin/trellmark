@@ -205,7 +205,14 @@ def test_live_group_and_url_child_order_includes_drag_handle(app, page):
     ) == ["group-header", "group-content"]
     assert group.locator(".group-header").evaluate(
         "element => [...element.children].map(child => child.className)"
-    ) == ["fold-toggle", "group-name", "group-count", "group-domains", "group-actions"]
+    ) == [
+        "group-drag-handle",
+        "fold-toggle",
+        "group-name",
+        "group-count",
+        "group-domains",
+        "group-actions",
+    ]
     assert group.locator(".url-item").evaluate(
         "element => [...element.children].map(child => child.className)"
     ) == ["url-main", "url-controls"]

@@ -76,7 +76,7 @@ function prefixIds(owner, prefix) {
 function render() {
     const options = { iconSource: (record) => localIconSource(record.id),
         actions: { ...editors, toggleFold } };
-    renderGroups(groupsRoot, count, model.server.groups.filter(group => !rareGroups.has(group.id)), model.ui, { ...options, actions: { ...options.actions, makeHeaderDraggable: drag.makeHeaderDraggable } });
+    renderGroups(groupsRoot, count, model.server.groups.filter(group => !rareGroups.has(group.id)), model.ui, { ...options, actions: { ...options.actions, makeGroupDraggable: drag.makeGroupDraggable } });
     for (const { example, groups, savedCount } of sections) {
         const ids = new Set(example.groups.map(group => group.id));
         renderGroups(groups, savedCount, model.server.groups.filter(group => ids.has(group.id)), { ...model.ui, safeMode: example.safeMode ?? false }, options);

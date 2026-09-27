@@ -48,7 +48,13 @@ export function renderGroup(group, depth, visibleUrlIds, ui, groups, options) {
         aria: { label: `Toggle ${group.name}`, expanded: !isFolded, controls: content.id },
     });
     toggle.addEventListener("click", () => options.actions.toggleFold?.(group.id, toggle, content));
-    options.actions.makeHeaderDraggable?.(header, section, group.id, group.parent_id);
+    if (options.actions.makeGroupDraggable) {
+        const handle = h("span", {
+            className: "group-drag-handle", title: "Drag to reorder group", aria: { hidden: true },
+        }, ["⠿"]);
+        header.append(handle);
+        options.actions.makeGroupDraggable(handle, header, section, group.id, group.parent_id);
+    }
     header.append(toggle, name);
     if (group.nsfw) {
         header.append(nsfwBadge);

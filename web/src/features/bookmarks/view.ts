@@ -5,7 +5,7 @@ import { sortUrls, treeGroups, visibleGroups, type BookmarkGroup, type BookmarkU
 
 export interface BookmarkViewActions {
   toggleFold?(groupId: number, toggle: HTMLButtonElement, content: HTMLDivElement): void;
-  makeHeaderDraggable?(header: HTMLElement, section: HTMLElement, groupId: number, parentId: number | null): void;
+  makeGroupDraggable?(handle: HTMLElement, header: HTMLElement, section: HTMLElement, groupId: number, parentId: number | null): void;
   makeUrlDraggable?(handle: HTMLElement, item: HTMLElement, id: number, sourceGroupId: number, select: HTMLSelectElement): void;
   showGroupEditor?(group: BookmarkGroup): void;
   requestGroupDelete?(group: BookmarkGroup): void;
@@ -84,7 +84,13 @@ export function renderGroup(
   });
   toggle.addEventListener("click", () => options.actions.toggleFold?.(group.id, toggle, content));
 
-  options.actions.makeHeaderDraggable?.(header, section, group.id, group.parent_id);
+  if (options.actions.makeGroupDraggable) {
+    const handle = h("span", {
+      className: "group-drag-handle", title: "Drag to reorder group", aria: { hidden: true },
+    }, ["⠿"]);
+    header.append(handle);
+    options.actions.makeGroupDraggable(handle, header, section, group.id, group.parent_id);
+  }
 
   header.append(toggle, name);
   if (group.nsfw) {
