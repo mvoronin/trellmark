@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 current_phase: null
 current_phase_name: None (milestone v0.0.1 archived)
 status: complete
-stopped_at: Milestone v0.0.1 archived after Phase 03; Notes MVP deferred
-last_updated: "2026-09-06T00:00:00.000Z"
-last_activity: 2026-09-06
-last_activity_desc: Completed quick task 260906-fh6 - Add link dragging between groups
-state_head: 64d308e26a440d335c7b59462f9fd5a471ba7c68
+stopped_at: Quick task 260927-u8z complete and verified; Notes MVP deferred
+last_updated: "2026-09-27T20:16:21Z"
+last_activity: 2026-09-27
+last_activity_desc: Completed quick task 260927-u8z - Restrict group dragging to a far-left handle
+state_head: b14fa9ebf474b92c7064ecc83071c843b346e4e6
 progress:
   total_phases: 3
   completed_phases: 3
@@ -23,15 +23,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-05)
 
 **Core value:** A single user can safely organize durable personal knowledge as bookmarks and Markdown notes without losing data or exposing private content.
-**Current focus:** No active phase; milestone v0.0.1 archived
+**Current focus:** Quick task 260927-u8z complete; no active phase; milestone v0.0.1 archived
 
 ## Current Position
 
 Phase: None — milestone archived
-Plan: Not started
+Plan: Quick task 260927-u8z complete and verified
 Completed plans in current phase: 0 (not yet planned)
-Status: Milestone archived at user request after Phase 03 completion
-Last activity: 2026-09-06 — Completed quick task 260906-fh6: Add link dragging between groups
+Status: Quick task complete; milestone remains archived after Phase 03
+Last activity: 2026-09-27 — Completed quick task 260927-u8z: Restrict group dragging to a far-left handle
 
 Progress: [██████████] 100% of the archived milestone scope
 
@@ -108,7 +108,7 @@ Progress: [██████████] 100% of the archived milestone scope
 
 ### Pending Todos
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
@@ -117,10 +117,11 @@ None yet.
 
 ### Quick Tasks Completed
 
-| # | Description | Date | Commit | Directory |
-|---|-------------|------|--------|-----------|
-| 260830-iif | Add a filesystem-safe UTC timestamp to exported-data filenames while preserving the export format and behavior. | 2026-08-30 | 248ccc8 | [260830-iif-add-a-filesystem-safe-utc-timestamp-to-e](./quick/260830-iif-add-a-filesystem-safe-utc-timestamp-to-e/) |
-| 260906-fh6 | Add link dragging between groups. | 2026-09-06 | c379c9c | [260906-fh6-add-link-dragging-between-groups](./quick/260906-fh6-add-link-dragging-between-groups/) |
+| # | Description | Date | Commit | Status | Directory |
+|---|-------------|------|--------|--------|-----------|
+| 260830-iif | Add a filesystem-safe UTC timestamp to exported-data filenames while preserving the export format and behavior. | 2026-08-30 | 248ccc8 | | [260830-iif-add-a-filesystem-safe-utc-timestamp-to-e](./quick/260830-iif-add-a-filesystem-safe-utc-timestamp-to-e/) |
+| 260906-fh6 | Add link dragging between groups. | 2026-09-06 | c379c9c | | [260906-fh6-add-link-dragging-between-groups](./quick/260906-fh6-add-link-dragging-between-groups/) |
+| 260927-u8z | Restrict group dragging to a far-left handle. | 2026-09-27 | b14fa9e | Verified | [260927-u8z-restrict-group-dragging-to-a-far-left-ha](./quick/260927-u8z-restrict-group-dragging-to-a-far-left-ha/) |
 
 ### Roadmap Evolution
 
@@ -134,6 +135,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-05T19:57:57Z
-Stopped at: Phase 03 complete; Phase 04 ready to plan
+Last session: 2026-09-27T20:16:21Z
+Stopped at: Quick task 260927-u8z complete and verified. Notes remains deferred.
 Resume file: None
