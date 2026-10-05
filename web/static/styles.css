@@ -787,14 +787,9 @@ body {
   padding: var(--gap-1) var(--gap-2);
   background: var(--group-marker);
   color: var(--accent-text);
-  cursor: grab;
-  /* Claim touch gestures on the title line so a drag reorders instead of
-     scrolling; prevent text selection while dragging. */
-  touch-action: none;
-  user-select: none;
 }
 
-.group.dragging .group-header {
+.group.dragging > .group-header > .group-drag-handle {
   cursor: grabbing;
 }
 
@@ -815,6 +810,7 @@ body {
 
 .fold-toggle {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   width: 1.25rem;
@@ -841,9 +837,11 @@ body {
 }
 
 .group-name {
+  min-width: 0;
   margin: 0;
   font-size: var(--text-md);
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .group-count {
@@ -990,13 +988,16 @@ body {
   background: color-mix(in oklab, var(--important) 12%, var(--surface));
 }
 
+.group-drag-handle,
 .url-drag-handle {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   min-width: 2rem;
   min-height: 2rem;
   cursor: grab;
+  /* Claim only handle gestures so the rest of the row can scroll and select. */
   touch-action: none;
   user-select: none;
 }

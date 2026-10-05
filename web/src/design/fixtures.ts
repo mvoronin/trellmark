@@ -48,7 +48,7 @@ export function rareExamples(): DesignExample[] {
     { id: "all", title: "All groups", description: "The NSFW group is shown alongside safe content.", groups: filterGroups, safeMode: false },
     { id: "hierarchy", title: "All three hierarchy depths", description: "Nested groups retain their real controls and indentation.", groups: [parent] },
     { id: "folding", title: "Folded and unfolded", description: "Both starting states are shown together. Each toggle works.", groups: [sampleGroup(20, "Folded example", [sampleUrl(200)]), sampleGroup(21, "Unfolded example", [sampleUrl(210)])], folded: [20] },
-    { id: "drag", title: "Drag placeholder and drop indicator", description: "The real dragged-group and target states. Drag the interactive Reading header above to try reordering.", groups: [sampleGroup(22, "Dragged group", [sampleUrl(220)]), sampleGroup(23, "Drop target", [sampleUrl(230)])] },
+    { id: "drag", title: "Drag placeholder and drop indicator", description: "The real dragged-group and target states. Drag the dotted handle at the far left of the interactive Reading header above to try reordering.", groups: [sampleGroup(22, "Dragged group", [sampleUrl(220)]), sampleGroup(23, "Drop target", [sampleUrl(230)])] },
   ];
 }
 

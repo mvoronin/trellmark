@@ -81,7 +81,7 @@ function render(): void {
   const options = { iconSource: (record: { id: number }) => localIconSource(record.id),
     actions: { ...editors, toggleFold } };
   renderGroups(groupsRoot, count, model.server.groups.filter(group => !rareGroups.has(group.id)), model.ui,
-    { ...options, actions: { ...options.actions, makeHeaderDraggable: drag.makeHeaderDraggable } });
+    { ...options, actions: { ...options.actions, makeGroupDraggable: drag.makeGroupDraggable } });
   for (const { example, groups, savedCount } of sections) {
     const ids = new Set(example.groups.map(group => group.id));
     renderGroups(groups, savedCount, model.server.groups.filter(group => ids.has(group.id)),

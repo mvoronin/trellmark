@@ -7,6 +7,10 @@ links in nested groups with titles, importance flags, domain rules,
 safe/private visibility, and site icons. First-class notes are the next major
 product capability.
 
+Reorder groups within their current parent by dragging the dotted handle at the
+far left of the group header, before the collapse arrow. The rest of the header
+supports normal scrolling and title selection.
+
 Move a link by dragging its dotted handle onto another group's header or
 contents. Mouse, touch, and pen use the same gesture; Escape cancels it.
 Empty and folded groups accept drops. The move selector also supports keyboard

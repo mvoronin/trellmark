@@ -5,10 +5,10 @@ export function createBookmarkDrag(groupsContainer, operations) {
     const listeners = new AbortController();
     let disposed = false;
     let urlDrag = null;
-    // Reorder groups by dragging a title line. This uses Pointer Events rather than
+    // Reorder groups by dragging their handle. This uses Pointer Events rather than
     // the HTML5 drag-and-drop API so a single path works for mouse, touch (Android),
-    // and pen. The header carries touch-action: none so a touch-drag reorders
-    // instead of scrolling the page.
+    // and pen. Only the handle claims touch gestures; the rest of the header
+    // remains available for scrolling and text selection.
     const DRAG_THRESHOLD = 6; // px of movement before a press becomes a drag
     function makeUrlDraggable(handle, item, id, sourceGroupId, select) {
         handle.addEventListener("pointerdown", (event) => {
@@ -82,16 +82,12 @@ export function createBookmarkDrag(groupsContainer, operations) {
         if (event.key === "Escape")
             cancel();
     }, { signal: listeners.signal });
-    function makeHeaderDraggable(header, section, groupId, parentId) {
-        header.addEventListener("pointerdown", (event) => {
-            // Only the primary button/finger, and never when the press starts on the
-            // fold toggle (that stays a plain click).
+    function makeGroupDraggable(handle, header, section, groupId, parentId) {
+        handle.addEventListener("pointerdown", (event) => {
             if (disposed || urlDrag || bookmarks.ui.activeDrag || event.button !== 0 || !event.isPrimary) {
                 return;
             }
-            if (event.target instanceof Element && event.target.closest("button")) {
-                return;
-            }
+            event.preventDefault();
             bookmarks.startDrag({
                 groupId,
                 parentId,
@@ -105,6 +101,7 @@ export function createBookmarkDrag(groupsContainer, operations) {
             header.addEventListener("pointermove", onDragMove);
             header.addEventListener("pointerup", onDragEnd);
             header.addEventListener("pointercancel", onDragCancel);
+            header.addEventListener("lostpointercapture", onDragCancel);
         }, { signal: listeners.signal });
     }
     function onDragMove(event) {
@@ -174,6 +171,7 @@ export function createBookmarkDrag(groupsContainer, operations) {
         header.removeEventListener("pointermove", onDragMove);
         header.removeEventListener("pointerup", onDragEnd);
         header.removeEventListener("pointercancel", onDragCancel);
+        header.removeEventListener("lostpointercapture", onDragCancel);
         if (header.hasPointerCapture(pointerId)) {
             header.releasePointerCapture(pointerId);
         }
@@ -229,7 +227,7 @@ export function createBookmarkDrag(groupsContainer, operations) {
         }
     }
     return {
-        makeHeaderDraggable, makeUrlDraggable, cancel,
+        makeGroupDraggable, makeUrlDraggable, cancel,
         dispose() {
             disposed = true;
             cancel();

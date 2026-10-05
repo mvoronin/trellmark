@@ -3,6 +3,35 @@ from urllib.parse import urlsplit
 import pytest
 from playwright.sync_api import expect
 
+from tests.frontend.test_group_reorder import mouse_drag_over
+
+
+def test_design_reorders_only_from_the_far_left_handle(static_page):
+    origin = f"{urlsplit(static_page.url).scheme}://{urlsplit(static_page.url).netloc}"
+    requests = []
+    static_page.on("request", lambda request: requests.append(request.url))
+    static_page.goto(f"{origin}/design.html")
+    headers = static_page.locator("#groups > .group > .group-header")
+    reading = headers.filter(
+        has=static_page.get_by_role("heading", name="Reading", exact=True)
+    )
+    default = headers.filter(
+        has=static_page.get_by_role("heading", name="default", exact=True)
+    )
+    handle = reading.locator(".group-drag-handle")
+    expect(handle).to_be_visible()
+    assert handle.evaluate(
+        "handle => handle === handle.parentElement.firstElementChild"
+    )
+    # Read-only examples without a drag action must not advertise an active grip.
+    expect(static_page.locator("#design-examples .group-drag-handle")).to_have_count(0)
+    mouse_drag_over(static_page, handle, default, y_fraction=0.85)
+    assert handle.evaluate("handle => getComputedStyle(handle).cursor") == "grabbing"
+    static_page.mouse.up()
+    expect(static_page.locator("#form-status")).to_have_text("Reordered.")
+    expect(headers.locator(".group-name")).to_have_text(["default", "Reading"])
+    assert all(not urlsplit(url).path.startswith("/api/") for url in requests)
+
 
 def test_design_uses_local_components_and_resets_isolated_state(static_page, browser):
     origin = f"{urlsplit(static_page.url).scheme}://{urlsplit(static_page.url).netloc}"
